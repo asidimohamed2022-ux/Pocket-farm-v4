@@ -1,0 +1,4443 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, { useState, useEffect, useCallback, useRef, memo, useMemo } from 'react';
+import { 
+  Sprout, 
+  Hand, 
+  Trash2, 
+  ShoppingBasket, 
+  Package, 
+  Store, 
+  Zap, 
+  Coins,
+  ChevronUp,
+  ChevronDown,
+  Play,
+  X,
+  Check,
+  PawPrint,
+  Bird,
+  Home,
+  Plus,
+  Star,
+  Gift,
+  User,
+  HelpCircle,
+  FlaskConical,
+  RotateCcw,
+  MessageCircle,
+  Instagram,
+  Settings,
+  Languages,
+  Wallet,
+  Moon,
+  Sun,
+  Music,
+  Volume2,
+  Square,
+  Pause,
+  Upload,
+  Sparkles,
+  Save,
+  FileText,
+  Download,
+  FileUp,
+  CheckCircle2,
+  AlertCircle
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { CropType, ToolType, PlotState, GameState, Rarity, AnimalType, CageState, AnimalProductType, InfusionType, SeasonalEventType, EventMode } from './types';
+import { TRANSLATIONS, LANGUAGES, LanguageCode, GAME_ITEM_TRANSLATIONS } from './translations';
+import { getActiveSeasonalEvent, getEventSeasonYear, getEventCropMultiplier, getCropBuyPrice, getCropSellPrice, isCropAvailableInShop, SEASONAL_EVENTS } from './events';
+import { EventModal } from './components/EventModal';
+import { CurrentEventHelpSection } from './components/CurrentEventHelpSection';
+import { ChristmasTreeModal } from './components/ChristmasTreeModal';
+import { MarkmanModal } from './components/MarkmanModal';
+import { NiroBlenderModal } from './components/NiroBlenderModal';
+import { RayanRamadanModal } from './components/RayanRamadanModal';
+import { 
+  CROPS, 
+  ANIMALS,
+  ANIMAL_PRODUCTS,
+  INITIAL_MONEY, 
+  INITIAL_PLOTS, 
+  PLOT_COST, 
+  AUTO_HARVEST_DURATION,
+  ANIMAL_AREA_COST,
+  CAGE_COST,
+  INITIAL_CAGES,
+  MAX_CAGES,
+  PREMIUM_PACK_PRICE,
+  INFUSIONS,
+  TONIC_PRICES,
+  TONICS,
+  RARITY_ORDER
+} from './constants';
+
+// --- Constants & Helpers ---
+
+const MIGRATION_MAP: Record<string, string> = {
+  'Sky Ruller': 'Sky Ruler',
+  'Sun Skaper': 'Sun Shaper',
+  'Miniral Berys': 'Mineral Berries'
+};
+
+const migrateCropType = (type: string): CropType => {
+  return (MIGRATION_MAP[type] as CropType) || (type as CropType);
+};
+
+const getInfusedCropKey = (type: CropType, infusions?: InfusionType[], isFavorite: boolean = false) => {
+  const infusionsPart = infusions && infusions.length > 0 ? [...infusions].sort().join(',') : '';
+  return `${type}|${infusionsPart}|${isFavorite}`;
+};
+
+const parseInfusedCropKey = (key: string): { type: CropType, infusions: InfusionType[], isFavorite: boolean } => {
+  const parts = key.split('|');
+  if (parts.length === 3) {
+    const [type, infusionsStr, isFavoriteStr] = parts;
+    return { 
+      type: type as CropType, 
+      infusions: infusionsStr ? infusionsStr.split(',') as InfusionType[] : [], 
+      isFavorite: isFavoriteStr === 'true' 
+    };
+  }
+  // Fallback for old keys
+  const [type, ...infusions] = key.split('|');
+  return { type: type as CropType, infusions: infusions as InfusionType[], isFavorite: false };
+};
+
+const getInfusionMultiplier = (infusions: InfusionType[]) => {
+  if (!infusions || !Array.isArray(infusions) || !INFUSIONS) return 1;
+  return infusions.reduce((acc, inf) => {
+    const infusion = INFUSIONS[inf];
+    return acc * (infusion ? infusion.multiplier : 1);
+  }, 1);
+};
+
+const INITIAL_STATE_BASE: Omit<GameState, 'lastSaved'> = {
+  money: INITIAL_MONEY,
+  unlockedPlots: INITIAL_PLOTS,
+  inventory: {},
+  seedInventory: {},
+  animalInventory: {},
+  animalProductInventory: {},
+  tonicInventory: {},
+  plots: Array.from({ length: 16 }, (_, i) => ({
+    id: i,
+    crop: null,
+    plantedAt: null,
+    isReady: false,
+    infusions: []
+  })),
+  cages: Array.from({ length: MAX_CAGES }, (_, i) => ({
+    id: i,
+    type: null,
+    count: 0,
+    lastProduction: null
+  })),
+  unlockedCages: INITIAL_CAGES,
+  animalAreaUnlocked: false,
+  activeTool: 'Hand',
+  selectedSeed: 'Carrot',
+  selectedTonic: null,
+  autoHarvestUntil: null,
+  hasPremiumPack: false,
+  permanentAutoHarvest: false,
+  hasGrowthBoost: false,
+  tutorialStep: 'welcome',
+  hasCompletedTutorial: false,
+  totalMoneyEarned: 0,
+  totalCropsHarvested: 0,
+  language: 'en',
+  musicVolume: 0.5,
+  isMusicPlaying: false,
+  customMusicName: null,
+  customMusicData: null,
+  musicKey: 0,
+  darkMode: false,
+  eventOverride: 'auto',
+  christmasTree: {
+    year: 2026,
+    unlockedBalls: [],
+    hungBalls: [],
+    challengesProgress: {},
+    santaVisited: false,
+    openedPresents: [],
+    rudolphClaimed: false,
+    seedsPlantedCount: 0,
+    candyCaneHarvested: 0,
+    completedYears: [],
+  },
+  summerNiro: {
+    timesCooled: 0,
+    totalPanachesBlended: 0,
+    sunChillLevel: 0,
+  },
+  ramadanRayan: {
+    completedMeals: [],
+    camelClaimed: false,
+    totalFeastsCompleted: 0,
+    totalCoinsEarned: 0,
+  }
+};
+
+const formatNumberShort = (num: number) => {
+  if (num === 0) return '0';
+  const absNum = Math.abs(num);
+  if (absNum < 1000) return num.toLocaleString();
+
+  const suffixes = [
+    '', 'K', 'M', 'B', 'T', 'Qa', 'Qi', 'Sx', 'Sp', 'Oc', 'No', 'Dc',
+    'Ud', 'Dd', 'Td', 'Qad', 'Qid', 'Sxd', 'Spd', 'Ocd', 'Nod', 'Vg',
+    'Uvg', 'Dvg', 'Tvg', 'Qavg', 'Qivg', 'Sxvg', 'Spvg', 'Ocvg', 'Novg', 'Tg'
+  ];
+
+  const exponent = Math.floor(Math.log10(absNum) / 3);
+  const suffixIndex = Math.min(exponent, suffixes.length - 1);
+  
+  const shortValue = num / Math.pow(10, suffixIndex * 3);
+  
+  // Handle potential scientific notation from very large shortValue
+  let formatted = shortValue.toFixed(2);
+  if (formatted.includes('e')) {
+    const parts = formatted.split('e');
+    const base = parts[0];
+    const power = parseInt(parts[1]);
+    if (power > 0) {
+      const dotIndex = base.indexOf('.');
+      let cleanBase = base.replace('.', '');
+      if (dotIndex === -1) {
+        formatted = cleanBase + '0'.repeat(power);
+      } else {
+        const afterDot = base.length - dotIndex - 1;
+        if (power >= afterDot) {
+          formatted = cleanBase + '0'.repeat(power - afterDot);
+        } else {
+          formatted = cleanBase.slice(0, dotIndex + power) + '.' + cleanBase.slice(dotIndex + power);
+        }
+      }
+    }
+  }
+  
+  // Remove trailing zeros and unnecessary decimal point
+  formatted = formatted.replace(/\.?0+$/, '');
+  
+  return formatted + suffixes[suffixIndex];
+};
+
+const formatTimeShort = (seconds: number) => {
+  if (seconds >= 3600) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
+  if (seconds >= 60) {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  }
+  return seconds + 's';
+};
+
+const formatCurrency = (amount: number) => {
+  return `£${formatNumberShort(amount)}`;
+};
+
+const rollForInfusions = (): InfusionType[] => {
+  const infusions: InfusionType[] = [];
+  const chances: Record<InfusionType, number> = {
+    Lucky: 0.05,
+    Corrupted: 0.03,
+    Hollowed: 0.03,
+    Darker: 0.02,
+    Dragonic: 0.01,
+    Radioactive: 0.005,
+    Divine: 0.001,
+    Random: 0,
+  };
+
+  Object.entries(chances).forEach(([type, chance]) => {
+    if (Math.random() < chance) {
+      infusions.push(type as InfusionType);
+    }
+  });
+
+  return infusions;
+};
+
+const hydrateAndMigrateGameState = (raw: any, currentGameDate: Date): { state: GameState; readyCount: number } => {
+  const parsed = { ...raw };
+  if (!parsed.tonicInventory) parsed.tonicInventory = {};
+  if (!parsed.animalProductInventory) parsed.animalProductInventory = {};
+  if (!parsed.inventory) parsed.inventory = {};
+  if (!parsed.seedInventory) parsed.seedInventory = {};
+  if (!parsed.animalInventory) parsed.animalInventory = {};
+  if (!parsed.cages) parsed.cages = [];
+  if (!parsed.plots) parsed.plots = [];
+  if (!parsed.language) parsed.language = 'en';
+  if (parsed.money === undefined || typeof parsed.money !== 'number') parsed.money = 100;
+  if (parsed.musicVolume === undefined) parsed.musicVolume = 0.5;
+  if (parsed.isMusicPlaying === undefined) parsed.isMusicPlaying = false;
+  if (parsed.customMusicName === undefined) parsed.customMusicName = null;
+  if (parsed.customMusicData === undefined) parsed.customMusicData = null;
+  if (parsed.darkMode === undefined) parsed.darkMode = false;
+  parsed.eventOverride = 'auto';
+
+  const currentSeasonYear = getEventSeasonYear('christmas', currentGameDate);
+  if (!parsed.christmasTree) {
+    parsed.christmasTree = {
+      year: currentSeasonYear,
+      unlockedBalls: [],
+      hungBalls: [],
+      challengesProgress: {},
+      santaVisited: false,
+      openedPresents: [],
+      rudolphClaimed: false,
+      seedsPlantedCount: 0,
+      candyCaneHarvested: 0,
+      completedYears: [],
+    };
+  } else {
+    if (!parsed.christmasTree.completedYears) {
+      parsed.christmasTree.completedYears = [];
+    }
+    if (parsed.christmasTree.year && parsed.christmasTree.year < currentSeasonYear) {
+      const wasCompleted = (parsed.christmasTree.hungBalls || []).length >= 10;
+      const prevCompleted = parsed.christmasTree.completedYears || [];
+      const updatedCompleted = wasCompleted && !prevCompleted.includes(parsed.christmasTree.year)
+        ? [...prevCompleted, parsed.christmasTree.year]
+        : prevCompleted;
+      parsed.christmasTree = {
+        year: currentSeasonYear,
+        unlockedBalls: [],
+        hungBalls: [],
+        challengesProgress: {},
+        santaVisited: false,
+        openedPresents: [],
+        rudolphClaimed: parsed.christmasTree.rudolphClaimed || false,
+        seedsPlantedCount: 0,
+        candyCaneHarvested: 0,
+        completedYears: updatedCompleted,
+      };
+    } else if (!parsed.christmasTree.year) {
+      parsed.christmasTree.year = currentSeasonYear;
+    }
+  }
+
+  if (!parsed.summerNiro) {
+    parsed.summerNiro = {
+      timesCooled: 0,
+      totalPanachesBlended: 0,
+      sunChillLevel: 0,
+    };
+  }
+
+  if (!parsed.ramadanRayan) {
+    parsed.ramadanRayan = {
+      completedMeals: [],
+      camelClaimed: false,
+      totalFeastsCompleted: 0,
+      totalCoinsEarned: 0,
+    };
+  }
+
+  // Migrate legacy crop names in seedInventory
+  const migratedSeedInventory: Partial<Record<CropType, number>> = {};
+  Object.keys(parsed.seedInventory).forEach(key => {
+    const migratedType = migrateCropType(key);
+    migratedSeedInventory[migratedType] = (migratedSeedInventory[migratedType] || 0) + (parsed.seedInventory[key as CropType] || 0);
+  });
+  parsed.seedInventory = migratedSeedInventory;
+
+  // Migrate legacy crop names in inventory (keys are composite)
+  const migratedInventory: Record<string, number> = {};
+  Object.keys(parsed.inventory).forEach(key => {
+    const { type, infusions, isFavorite } = parseInfusedCropKey(key);
+    const migratedType = migrateCropType(type);
+    const migratedKey = getInfusedCropKey(migratedType, infusions, isFavorite);
+    migratedInventory[migratedKey] = (migratedInventory[migratedKey] || 0) + (parsed.inventory[key] || 0);
+  });
+  parsed.inventory = migratedInventory;
+
+  // Migrate selectedSeed
+  if (parsed.selectedSeed) {
+    parsed.selectedSeed = migrateCropType(parsed.selectedSeed);
+  }
+
+  // Migrate plots
+  parsed.plots = (parsed.plots || []).map((plot: any) => {
+    if (plot && plot.crop) {
+      return { ...plot, crop: migrateCropType(plot.crop) };
+    }
+    return plot;
+  });
+
+  const now = Date.now();
+  let readyCount = 0;
+
+  // Calculate offline growth
+  const updatedPlots = parsed.plots.map((plot: any) => {
+    const infusions = plot.infusions || [];
+    if (plot.crop && plot.plantedAt && !plot.isReady) {
+      const cropData = CROPS[plot.crop as CropType];
+      if (!cropData) return plot;
+      const effectiveGrowTime = parsed.hasGrowthBoost ? cropData.growTime * 0.8 : cropData.growTime;
+      const elapsed = (now - plot.plantedAt) / 1000;
+
+      const newInfusions = [...infusions];
+      const chances: Record<InfusionType, number> = {
+        Lucky: 0.0005,
+        Corrupted: 0.0003,
+        Hollowed: 0.0003,
+        Darker: 0.0002,
+        Dragonic: 0.0001,
+        Radioactive: 0.00005,
+        Divine: 0.00001,
+        Random: 0,
+      };
+
+      const rollTime = Math.min(elapsed, effectiveGrowTime);
+      (Object.keys(chances) as InfusionType[]).forEach(type => {
+        const p = 1 - Math.pow(1 - chances[type], rollTime);
+        if (Math.random() < p) {
+          newInfusions.push(type);
+        }
+      });
+
+      if (elapsed >= effectiveGrowTime) {
+        readyCount++;
+        return { ...plot, isReady: true, infusions: newInfusions };
+      }
+      return { ...plot, infusions: newInfusions };
+    }
+    return { ...plot, infusions };
+  });
+
+  // Calculate offline animal production
+  const newProductInventory = { ...parsed.animalProductInventory };
+  const updatedCages = parsed.cages.map((cage: any) => {
+    if (cage && cage.type && cage.count > 0 && cage.lastProduction) {
+      const animalData = ANIMALS[cage.type as AnimalType];
+      if (!animalData) return cage;
+      const elapsedSeconds = (now - cage.lastProduction) / 1000;
+      const cycles = Math.floor(elapsedSeconds / animalData.productionTime);
+
+      if (cycles > 0) {
+        const productType = animalData.product;
+        newProductInventory[productType] = (newProductInventory[productType] || 0) + (cycles * cage.count);
+        return { ...cage, lastProduction: now - (elapsedSeconds % animalData.productionTime) * 1000 };
+      }
+    }
+    return cage;
+  });
+
+  const finalState: GameState = {
+    ...parsed,
+    plots: updatedPlots,
+    cages: updatedCages,
+    animalProductInventory: newProductInventory,
+    lastSaved: now,
+  };
+
+  return { state: finalState, readyCount };
+};
+
+const formatSaveText = (state: GameState): string => {
+  const metaHeader = [
+    '# ========================================================',
+    '# POCKET FARM - GAME PROGRESS SAVE FILE',
+    `# Date: ${new Date().toISOString()}`,
+    `# Balance: £${formatNumberShort(state.money)}`,
+    `# Plots: ${state.plots?.length || 0}`,
+    '# Saved in game files (saves/save.txt)',
+    '# Put this .txt file into Settings -> Load to restore your farm!',
+    '# ========================================================\n'
+  ].join('\n');
+
+  return metaHeader + JSON.stringify({
+    ...state,
+    lastSaved: Date.now()
+  }, null, 2);
+};
+
+const parseSaveText = (text: string): any => {
+  if (!text || typeof text !== 'string') {
+    throw new Error('Save file is empty');
+  }
+  const trimmed = text.trim();
+  try {
+    const direct = JSON.parse(trimmed);
+    if (direct && typeof direct === 'object') return direct;
+  } catch {
+    // If text contains header comments, extract JSON substring
+  }
+
+  const startIdx = trimmed.indexOf('{');
+  const endIdx = trimmed.lastIndexOf('}');
+  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+    const jsonSub = trimmed.substring(startIdx, endIdx + 1);
+    const parsed = JSON.parse(jsonSub);
+    if (parsed && typeof parsed === 'object') return parsed;
+  }
+
+  throw new Error('Invalid save file format. Could not find valid game data in text file.');
+};
+
+const sortCrops = (cropTypes: string[], activeEventId: SeasonalEventType = 'none') => {
+  return [...cropTypes].sort((a, b) => {
+    const { type: typeA, infusions: infA, isFavorite: favA } = parseInfusedCropKey(a);
+    const { type: typeB, infusions: infB, isFavorite: favB } = parseInfusedCropKey(b);
+
+    // Favorite first
+    if (favA && !favB) return -1;
+    if (favB && !favA) return 1;
+
+    const cropA = CROPS[typeA];
+    const cropB = CROPS[typeB];
+    if (!cropA && !cropB) return 0;
+    if (!cropA) return 1;
+    if (!cropB) return -1;
+
+    // Active seasonal event crops first
+    const aIsActiveEvent = cropA.event && cropA.event === activeEventId;
+    const bIsActiveEvent = cropB.event && cropB.event === activeEventId;
+    if (aIsActiveEvent && !bIsActiveEvent) return -1;
+    if (bIsActiveEvent && !aIsActiveEvent) return 1;
+
+    // Then by multiplier (infusions)
+    const multA = getInfusionMultiplier(infA);
+    const multB = getInfusionMultiplier(infB);
+    if (multB !== multA) return multB - multA;
+
+    const rarityDiff = RARITY_ORDER.indexOf(cropA.rarity) - RARITY_ORDER.indexOf(cropB.rarity);
+    if (rarityDiff !== 0) return rarityDiff;
+    return cropA.buyPrice - cropB.buyPrice;
+  });
+};
+
+const IconRenderer = ({ 
+  icon, 
+  className = "", 
+  containerClassName = "",
+  fallback = "🍌"
+}: { 
+  icon: string; 
+  className?: string; 
+  containerClassName?: string;
+  fallback?: string;
+}) => {
+  const [hasError, setHasError] = useState(false);
+  const [isLoaded, setIsLoaded] = useState(false);
+
+  // Reset states when icon changes
+  useEffect(() => {
+    setHasError(false);
+    setIsLoaded(false);
+  }, [icon]);
+
+  const isImageRef = (icon.startsWith('/') || icon.startsWith('http') || icon.includes('.'));
+  const isBananaTails = icon === '/banana_tails.png' || icon.toLowerCase().includes('banana');
+  const showImage = isImageRef && !hasError;
+  
+  if (showImage) {
+    return (
+      <div className={`flex items-center justify-center overflow-hidden pointer-events-none relative ${containerClassName}`}>
+        {/* Loading/Fallback placeholder while image loads */}
+        {!isLoaded && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <span className={`${className} flex items-center justify-center leading-none select-none opacity-40`}>
+              {isBananaTails ? '🍌' : fallback}
+            </span>
+          </div>
+        )}
+        <img
+          src={icon}
+          alt=""
+          className={`w-full h-full object-contain pointer-events-none transition-opacity duration-200 ${isLoaded ? 'opacity-100' : 'opacity-0'} ${className}`}
+          referrerPolicy="no-referrer"
+          onLoad={() => setIsLoaded(true)}
+          onError={() => {
+            console.warn(`Icon failed to load: ${icon}`);
+            setHasError(true);
+          }}
+        />
+      </div>
+    );
+  }
+  
+  // If it's not an image or failed to load, render text/emoji
+  const displayIcon = isBananaTails ? '🍌' : fallback;
+  
+  return (
+    <div className={`flex items-center justify-center ${containerClassName}`}>
+      <span className={`${className} flex items-center justify-center leading-none select-none`}>
+        {hasError ? displayIcon : icon}
+      </span>
+    </div>
+  );
+};
+
+// --- Components ---
+
+const RarityEffect = memo(({ rarity, children, className = "" }: { rarity: Rarity; children: React.ReactNode; className?: string }) => {
+  const effects: Record<Rarity, string> = {
+    NR: "",
+    MID: "shadow-[0_0_10px_rgba(255,255,255,0.5)]",
+    Splatsh: "shadow-[0_0_20px_rgba(6,182,212,0.8)] bg-gradient-to-br from-cyan-400/20 via-sky-300/20 to-teal-400/20 animate-pulse",
+    Sawm: "shadow-[0_0_22px_rgba(16,185,129,0.85)] bg-gradient-to-br from-emerald-500/25 via-teal-400/20 to-amber-300/25 animate-pulse",
+    Legendary: "shadow-[0_0_15px_rgba(255,215,0,0.6)] animate-pulse",
+    Myth: "shadow-[0_0_20px_rgba(147,51,234,0.7)] animate-pulse",
+    Secret: "shadow-[0_0_25px_rgba(0,0,0,0.8)] bg-slate-200 animate-pulse",
+    Divine: "shadow-[0_0_35px_rgba(255,255,255,0.9),0_0_20px_rgba(255,215,0,0.8)] bg-amber-300 animate-pulse",
+    Celestial: "shadow-[0_0_35px_rgba(224,242,254,0.9),0_0_15px_rgba(255,255,255,1)] bg-sky-50",
+  };
+
+  return (
+    <div className={`relative rounded-2xl ${effects[rarity]} ${className}`}>
+      {rarity === 'Sawm' && (
+        <div key="sawm-effect" className="absolute inset-0 pointer-events-none overflow-hidden rounded-2xl">
+          {[...Array(6)].map((_, i) => (
+            <motion.div
+              key={`sawm-mote-${i}`}
+              animate={{ 
+                opacity: [0, 1, 0], 
+                scale: [0.2, 1.2, 0.2], 
+                y: [8, -16], 
+                x: [(i % 2 === 0 ? 1 : -1) * (i * 2.2 + 3)] 
+              }}
+              transition={{ repeat: Infinity, duration: 1.8, delay: i * 0.28 }}
+              className={`absolute bottom-1 left-1/2 w-1.5 h-1.5 rounded-full ${
+                i % 2 === 0 
+                  ? 'bg-amber-300 shadow-[0_0_7px_rgba(252,211,77,0.95)]' 
+                  : 'bg-emerald-400 shadow-[0_0_7px_rgba(52,211,153,0.95)]'
+              }`}
+            />
+          ))}
+        </div>
+      )}
+      {rarity === 'Splatsh' && (
+        <div key="splatsh-effect" className="absolute inset-0 pointer-events-none overflow-hidden rounded-2xl">
+          {[...Array(6)].map((_, i) => (
+            <motion.div
+              key={`splatsh-bubble-${i}`}
+              animate={{ 
+                opacity: [0, 0.9, 0], 
+                scale: [0.3, 1.2, 0.1], 
+                y: [6, -14], 
+                x: [(i % 2 === 0 ? 1 : -1) * (i * 2.5 + 2)] 
+              }}
+              transition={{ repeat: Infinity, duration: 1.5, delay: i * 0.25 }}
+              className="absolute bottom-1 left-1/2 w-1.5 h-1.5 bg-cyan-400 rounded-full shadow-[0_0_6px_rgba(6,182,212,0.9)]"
+            />
+          ))}
+        </div>
+      )}
+      {rarity === 'Legendary' && (
+        <div key="legendary-effect" className="absolute inset-0 pointer-events-none overflow-hidden rounded-2xl">
+          {[...Array(5)].map((_, i) => (
+            <motion.div
+              key={`legendary-sparkle-${i}`}
+              animate={{ opacity: [0, 1, 0], scale: [0, 1, 0], x: [0, (i - 2) * 10], y: [0, (i - 2) * -10] }}
+              transition={{ repeat: Infinity, duration: 2, delay: i * 0.4 }}
+              className="absolute top-1/2 left-1/2 w-1 h-1 bg-yellow-300 rounded-full"
+            />
+          ))}
+        </div>
+      )}
+      {rarity === 'Secret' && (
+        <div key="secret-effect" className="absolute inset-0 pointer-events-none overflow-hidden rounded-2xl">
+          {[...Array(8)].map((_, i) => (
+            <motion.div
+              key={`secret-sparkle-${i}`}
+              animate={{ opacity: [0, 0.5, 0], scale: [0.5, 1.5, 0.5], x: [0, (i - 4) * 5], y: [0, (i - 4) * 5] }}
+              transition={{ repeat: Infinity, duration: 3, delay: i * 0.3 }}
+              className="absolute top-1/2 left-1/2 w-2 h-2 bg-purple-500/30 blur-sm rounded-full"
+            />
+          ))}
+        </div>
+      )}
+      {children}
+    </div>
+  );
+});
+
+const Plot = memo(({ 
+  plot, 
+  activeTool, 
+  onInteract,
+  hasGrowthBoost,
+  unlockedPlots
+}: { 
+  plot: PlotState; 
+  activeTool: ToolType; 
+  onInteract: (id: number) => void;
+  hasGrowthBoost: boolean;
+  unlockedPlots: number;
+}) => {
+  const [progress, setProgress] = useState(0);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    if (plot.crop && plot.plantedAt && !plot.isReady) {
+      const cropData = CROPS[plot.crop];
+      const updateProgress = () => {
+        const elapsed = (Date.now() - plot.plantedAt!) / 1000;
+        const effectiveGrowTime = hasGrowthBoost ? cropData.growTime * 0.8 : cropData.growTime;
+        const p = Math.min((elapsed / effectiveGrowTime) * 100, 100);
+        setProgress(p);
+        if (p < 100) {
+          timerRef.current = setTimeout(updateProgress, 100);
+        }
+      };
+      updateProgress();
+    } else {
+      setProgress(plot.isReady ? 100 : 0);
+    }
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, [plot.crop, plot.plantedAt, plot.isReady]);
+
+  const cropData = plot.crop ? CROPS[plot.crop] : null;
+
+  const cols = unlockedPlots <= 4 ? 2 : unlockedPlots <= 9 ? 3 : 4;
+  const iconSizeClass = cols === 2 ? "w-16 h-16" : cols === 3 ? "w-12 h-12" : "w-10 h-10";
+  const iconTextClass = cols === 2 ? "text-4xl" : cols === 3 ? "text-3xl" : "text-2xl";
+  const sproutSize = cols === 2 ? 32 : cols === 3 ? 24 : 20;
+
+  const infusionBadgeClass = cols === 2 
+    ? "bg-white/90 rounded-full p-0.5 shadow-sm border border-slate-200 flex items-center justify-center w-5 h-5" 
+    : cols === 3 
+    ? "bg-white/90 rounded-full p-0.5 shadow-sm border border-slate-200/80 flex items-center justify-center w-4 h-4" 
+    : "bg-white/90 rounded-full p-[1px] shadow-sm border border-slate-200/60 flex items-center justify-center w-3.5 h-3.5";
+
+  const tonicBadgeClass = cols === 2 
+    ? "bg-purple-100 rounded-full p-0.5 shadow-sm border border-purple-200 flex items-center justify-center w-5 h-5" 
+    : cols === 3 
+    ? "bg-purple-100 rounded-full p-0.5 shadow-sm border border-purple-200/80 flex items-center justify-center w-4 h-4" 
+    : "bg-purple-100 rounded-full p-[1px] shadow-sm border border-purple-200/60 flex items-center justify-center w-3.5 h-3.5";
+
+  const infusionTextClass = cols === 2 ? "text-[10px]" : cols === 3 ? "text-[9px]" : "text-[8px]";
+
+  const progressContainerClass = cols === 2 
+    ? "absolute bottom-1.5 left-1/2 -translate-x-1/2 w-14 h-1.5 bg-black/20 rounded-full overflow-hidden z-10" 
+    : cols === 3 
+    ? "absolute bottom-1.5 left-1/2 -translate-x-1/2 w-10 h-1.2 bg-black/20 rounded-full overflow-hidden z-10" 
+    : "absolute bottom-1 left-1/2 -translate-x-1/2 w-8 h-1 bg-black/20 rounded-full overflow-hidden z-10";
+
+  const readyIndicatorClass = cols === 2 
+    ? "absolute top-1 left-1 bg-white rounded-full p-1 shadow-md z-10" 
+    : "absolute top-1 left-1 bg-white rounded-full p-0.5 shadow-md z-10";
+  
+  const readyCheckSize = cols === 2 ? 12 : cols === 3 ? 10 : 8;
+
+  return (
+    <motion.div 
+      layout
+      whileTap={{ scale: 0.95 }}
+      onClick={() => onInteract(plot.id)}
+      className="relative w-full aspect-square bg-amber-900/40 rounded-xl border-2 border-amber-900/20 flex items-center justify-center cursor-pointer overflow-hidden shadow-inner"
+    >
+      {!plot.crop && (
+        <div className="text-amber-900/20">
+          <Sprout size={sproutSize} />
+        </div>
+      )}
+
+      {plot.crop && (
+        <>
+          <div className="relative flex flex-col items-center">
+            <RarityEffect rarity={cropData?.rarity || 'NR'}>
+              <motion.span 
+                key="crop-icon"
+                initial={{ scale: 0.5, opacity: 0 }}
+                animate={{ 
+                  scale: plot.isReady ? 1.2 : 0.5 + (progress / 200),
+                  opacity: 1 
+                }}
+                className="filter drop-shadow-md block p-2"
+              >
+                <IconRenderer 
+                  icon={cropData?.icon || '🌱'} 
+                  className={`w-full h-full ${iconTextClass}`} 
+                  containerClassName={iconSizeClass} 
+                />
+              </motion.span>
+            </RarityEffect>
+          </div>
+          
+          {/* Infusion Icons */}
+          {(plot.infusions && plot.infusions.length > 0 || plot.tonicApplied) && (
+            <div className="absolute top-1 right-1 flex flex-col gap-0.5 z-10">
+              {plot.tonicApplied && (
+                <motion.div
+                  key="tonic-indicator"
+                  initial={{ scale: 0 }}
+                  animate={{ scale: 1 }}
+                  className={tonicBadgeClass}
+                  title="Tonic Applied"
+                >
+                  <span className={infusionTextClass}>🧪</span>
+                </motion.div>
+              )}
+              {plot.infusions && plot.infusions.map((inf, i) => (
+                <motion.div
+                  key={`infusion-${i}`}
+                  initial={{ scale: 0, rotate: -45 }}
+                  animate={{ scale: 1, rotate: 0 }}
+                  className={infusionBadgeClass}
+                  title={inf}
+                >
+                  <span className={infusionTextClass}>{INFUSIONS[inf]?.icon || '✨'}</span>
+                </motion.div>
+              ))}
+            </div>
+          )}
+          
+          {!plot.isReady && (
+            <div className={progressContainerClass}>
+              <div 
+                className="h-full bg-green-500 transition-all duration-100" 
+                style={{ width: `${progress}%` }} 
+              />
+            </div>
+          )}
+
+          {plot.isReady && (
+            <motion.div 
+              key="ready-indicator"
+              animate={{ y: [0, -3, 0] }}
+              transition={{ repeat: Infinity, duration: 1.5 }}
+              className={readyIndicatorClass}
+            >
+              <Check size={readyCheckSize} className="text-green-600" />
+            </motion.div>
+          )}
+        </>
+      )}
+    </motion.div>
+  );
+});
+
+interface MusicManagerProps {
+  musicVolume: number;
+  isMusicPlaying: boolean;
+  customMusicData: string | null;
+  musicKey: number;
+}
+
+const MusicManager = ({ 
+  musicVolume, 
+  isMusicPlaying, 
+  customMusicData,
+  musicKey
+}: MusicManagerProps) => {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    if (!audioRef.current) {
+      audioRef.current = new Audio();
+      audioRef.current.loop = true;
+    }
+
+    const audio = audioRef.current;
+
+    if (customMusicData) {
+      // If we have custom music, try to use it
+      if (audio.src !== customMusicData) {
+        audio.src = customMusicData;
+      }
+    } else {
+      // Default game music if no custom one is provided
+      // Since I don't have a default audio file, I'll use a placeholder or silent if not provided
+      // For this task, the focus is on the custom music system
+      audio.src = ""; 
+    }
+
+    return () => {
+      audio.pause();
+      audio.src = "";
+    };
+  }, [customMusicData]);
+
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.volume = musicVolume;
+    }
+  }, [musicVolume]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    if (isMusicPlaying && audio.src) {
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(error => {
+          console.warn("Autoplay was prevented. User interaction required.", error);
+        });
+      }
+    } else {
+      audio.pause();
+    }
+  }, [isMusicPlaying, customMusicData]);
+
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.currentTime = 0;
+    }
+  }, [musicKey]);
+
+  return null;
+};
+
+export default function App() {
+  const [screen, setScreen] = useState<'menu' | 'farm'>('menu');
+  const [gameState, setGameState] = useState<GameState>({
+    ...INITIAL_STATE_BASE,
+    lastSaved: Date.now(),
+  });
+
+  const [showShop, setShowShop] = useState(false);
+  const [shopTab, setShopTab] = useState<'seeds' | 'tonics'>('seeds');
+  const [showInventory, setShowInventory] = useState(false);
+  const [inventoryTab, setInventoryTab] = useState<'crops' | 'animals' | 'tonics'>('crops');
+  const [showAnimalScreen, setShowAnimalScreen] = useState(false);
+  const [showAnimalShop, setShowAnimalShop] = useState(false);
+  const [showAnimalSelector, setShowAnimalSelector] = useState<number | null>(null);
+  const [showSeedSelector, setShowSeedSelector] = useState<number | null>(null);
+  const [showTonicSelector, setShowTonicSelector] = useState<number | null>(null);
+  const [pendingTonicPlotId, setPendingTonicPlotId] = useState<number | null>(null);
+  const [showAutoHarvestInfo, setShowAutoHarvestInfo] = useState(false);
+  const [showPremiumPackInfo, setShowPremiumPackInfo] = useState(false);
+  const [showRoyMenu, setShowRoyMenu] = useState(false);
+  const [showRoyHelp, setShowRoyHelp] = useState(false);
+  const [helpTab, setHelpTab] = useState<'main' | 'fruits' | 'infusions' | 'event'>('main');
+  const [showSettings, setShowSettings] = useState(false);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [spinResult, setSpinResult] = useState<CropType | null>(null);
+  const [toolsExpanded, setToolsExpanded] = useState(false);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+  const [showOfflineModal, setShowOfflineModal] = useState(false);
+  const [offlineReadyCount, setOfflineReadyCount] = useState(0);
+  const [showSellAllConfirm, setShowSellAllConfirm] = useState(false);
+  const [sellAllFeedback, setSellAllFeedback] = useState<string | null>(null);
+  const [showFullMoney, setShowFullMoney] = useState(false);
+  const [showEventModal, setShowEventModal] = useState(false);
+  const [eventToast, setEventToast] = useState<string | null>(null);
+  const [showMarkmanModal, setShowMarkmanModal] = useState(false);
+  const [showNiroModal, setShowNiroModal] = useState(false);
+  const [showRayanModal, setShowRayanModal] = useState(false);
+  const [showChristmasTreeModal, setShowChristmasTreeModal] = useState(false);
+
+  // Real-time automatic calendar date (auto updates from system clock)
+  const [currentGameDate, setCurrentGameDate] = useState<Date>(() => new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentGameDate(new Date());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const activeEvent = getActiveSeasonalEvent(gameState.eventOverride || 'auto', currentGameDate);
+
+  const formattedCalendarDate = useMemo(() => {
+    try {
+      return currentGameDate.toLocaleDateString(gameState.language === 'ar' ? 'ar-SA' : 'en-US', {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+      });
+    } catch {
+      return currentGameDate.toDateString();
+    }
+  }, [currentGameDate, gameState.language]);
+
+  const t = (key: string) => {
+    if (key) {
+      const religiousTerms = ['god', 'heaven', 'angelic', 'demonic', 'divine'];
+      const keyLower = key.toLowerCase();
+      if (religiousTerms.some(term => keyLower.includes(term))) {
+        return key;
+      }
+    }
+    return TRANSLATIONS[gameState.language]?.[key] || 
+           GAME_ITEM_TRANSLATIONS[gameState.language]?.[key] || 
+           TRANSLATIONS['en'][key] || 
+           GAME_ITEM_TRANSLATIONS['en'][key] || 
+           key;
+  };
+
+  const handleReset = () => {
+    const newState = {
+      ...INITIAL_STATE_BASE,
+      lastSaved: Date.now(),
+      language: gameState.language // Keep language preference
+    };
+    setGameState(newState);
+    setShowResetConfirm(false);
+    setShowSettings(false);
+    setScreen('menu');
+  };
+
+  // --- Save & Load State & Handlers ---
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [isLoadingSave, setIsLoadingSave] = useState(false);
+  const [loadMessage, setLoadMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [isDraggingSave, setIsDraggingSave] = useState(false);
+  const [serverSaveInfo, setServerSaveInfo] = useState<{ exists: boolean; size?: number; lastModified?: string | null } | null>(null);
+
+  const fetchServerSaveInfo = async () => {
+    try {
+      const res = await fetch('/api/saves');
+      if (res.ok) {
+        const data = await res.json();
+        setServerSaveInfo(data);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    if (showSettings) {
+      fetchServerSaveInfo();
+    }
+  }, [showSettings]);
+
+  const handleSaveGameToFile = async () => {
+    setIsSaving(true);
+    setSaveMessage(null);
+    try {
+      const currentSaveState: GameState = {
+        ...gameState,
+        lastSaved: Date.now(),
+      };
+      const textData = formatSaveText(currentSaveState);
+
+      // 1. Save directly into game files (saves/save.txt)
+      try {
+        const res = await fetch('/api/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ saveData: textData })
+        });
+        if (res.ok) {
+          await fetchServerSaveInfo();
+        }
+      } catch (err) {
+        console.warn('Could not post save to /api/save', err);
+      }
+
+      // 2. Download single text file
+      const blob = new Blob([textData], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'pocket_farm_save.txt';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      // 3. Save to localStorage
+      localStorage.setItem('pocket_farm_save_v3', JSON.stringify(currentSaveState));
+
+      setSaveMessage('Saved to saves/save.txt in game files and downloaded pocket_farm_save.txt!');
+      setTimeout(() => setSaveMessage(null), 7000);
+    } catch (err: any) {
+      setSaveMessage('Error saving game: ' + (err?.message || 'Unknown error'));
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleLoadFromFile = (file: File) => {
+    setIsLoadingSave(true);
+    setLoadMessage(null);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const content = e.target?.result as string;
+        const parsed = parseSaveText(content);
+        const { state: hydratedState, readyCount } = hydrateAndMigrateGameState(parsed, currentGameDate);
+        setGameState(hydratedState);
+        localStorage.setItem('pocket_farm_save_v3', JSON.stringify(hydratedState));
+
+        // Also write loaded state to game files
+        fetch('/api/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ saveData: content })
+        }).then(() => fetchServerSaveInfo()).catch(() => {});
+
+        const cropsCount = Object.values(hydratedState.inventory || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+        setLoadMessage({
+          type: 'success',
+          text: `Loaded successfully! £${formatNumberShort(hydratedState.money)}, ${hydratedState.plots.length} plots & ${cropsCount} crops restored.`
+        });
+        if (readyCount > 0) {
+          setOfflineReadyCount(readyCount);
+          setShowOfflineModal(true);
+        }
+      } catch (err: any) {
+        setLoadMessage({
+          type: 'error',
+          text: 'Failed to load save file: ' + (err?.message || 'Invalid format')
+        });
+      } finally {
+        setIsLoadingSave(false);
+      }
+    };
+    reader.onerror = () => {
+      setLoadMessage({ type: 'error', text: 'Failed to read the file.' });
+      setIsLoadingSave(false);
+    };
+    reader.readAsText(file);
+  };
+
+  const handleLoadFromGameFiles = async () => {
+    setIsLoadingSave(true);
+    setLoadMessage(null);
+    try {
+      const res = await fetch('/api/load');
+      if (!res.ok) {
+        throw new Error('No save file found in saves/save.txt');
+      }
+      const json = await res.json();
+      if (!json.success || !json.data) {
+        throw new Error(json.error || 'Failed to read saves/save.txt');
+      }
+      const parsed = parseSaveText(json.data);
+      const { state: hydratedState, readyCount } = hydrateAndMigrateGameState(parsed, currentGameDate);
+      setGameState(hydratedState);
+      localStorage.setItem('pocket_farm_save_v3', JSON.stringify(hydratedState));
+
+      const cropsCount = Object.values(hydratedState.inventory || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+      setLoadMessage({
+        type: 'success',
+        text: `Loaded from saves/save.txt! £${formatNumberShort(hydratedState.money)}, ${hydratedState.plots.length} plots & ${cropsCount} crops restored.`
+      });
+      if (readyCount > 0) {
+        setOfflineReadyCount(readyCount);
+        setShowOfflineModal(true);
+      }
+    } catch (err: any) {
+      setLoadMessage({
+        type: 'error',
+        text: 'Could not load from game files: ' + (err?.message || 'File not found')
+      });
+    } finally {
+      setIsLoadingSave(false);
+    }
+  };
+
+  const handleMusicUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const data = event.target?.result as string;
+        try {
+          setGameState(prev => ({
+            ...prev,
+            customMusicName: file.name,
+            customMusicData: data,
+            isMusicPlaying: true
+          }));
+        } catch (err) {
+          alert("File is too large to save locally. Please try a smaller music file (under 3MB).");
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const removeCustomMusic = () => {
+    setGameState(prev => ({
+      ...prev,
+      customMusicName: null,
+      customMusicData: null,
+      isMusicPlaying: false
+    }));
+  };
+
+  // --- Persistence & Notifications ---
+  
+  // Load game state
+  useEffect(() => {
+    const saved = localStorage.getItem('pocket_farm_save_v3');
+    if (saved) {
+      try {
+        const parsed: GameState = JSON.parse(saved);
+        const { state: hydratedState, readyCount } = hydrateAndMigrateGameState(parsed, currentGameDate);
+        setGameState(hydratedState);
+        
+        if (readyCount > 0) {
+          setOfflineReadyCount(readyCount);
+          setShowOfflineModal(true);
+          sendOfflineNotification(readyCount);
+        }
+      } catch (e) {
+        console.error("Failed to load save from localStorage", e);
+      }
+    } else {
+      // If no localStorage save exists yet, attempt to load from game files (saves/save.txt)
+      fetch('/api/load')
+        .then(res => res.ok ? res.json() : null)
+        .then(json => {
+          if (json && json.success && json.data) {
+            try {
+              const parsed = parseSaveText(json.data);
+              const { state: hydratedState, readyCount } = hydrateAndMigrateGameState(parsed, currentGameDate);
+              setGameState(hydratedState);
+              localStorage.setItem('pocket_farm_save_v3', JSON.stringify(hydratedState));
+              if (readyCount > 0) {
+                setOfflineReadyCount(readyCount);
+                setShowOfflineModal(true);
+                sendOfflineNotification(readyCount);
+              }
+            } catch (err) {
+              console.warn("Could not parse save from game files", err);
+            }
+          }
+        })
+        .catch(() => {});
+    }
+
+    if ("Notification" in window) {
+      Notification.requestPermission().then(permission => {
+        setNotificationsEnabled(permission === "granted");
+      });
+    }
+  }, []); // Run once on initial load, not on every date tick
+
+  // Save game state
+  useEffect(() => {
+    const save = () => {
+      localStorage.setItem('pocket_farm_save_v3', JSON.stringify({
+        ...gameState,
+        lastSaved: Date.now()
+      }));
+    };
+    const timeout = setTimeout(save, 1000); // Debounce save
+    return () => clearTimeout(timeout);
+  }, [gameState]);
+
+  const sendOfflineNotification = (count: number) => {
+    if (notificationsEnabled && document.visibilityState === 'hidden') {
+      const n = new Notification("Pocket Farm", {
+        body: `Your farm was busy 🌱 ${count} crops are ready to harvest!`,
+        icon: "/favicon.ico",
+        tag: "offline-ready",
+        // Note: actions are only supported in service workers, but we can use onclick
+      });
+      n.onclick = () => {
+        window.focus();
+        n.close();
+      };
+    }
+  };
+
+  const sendNotification = (cropType: CropType) => {
+    if (notificationsEnabled && document.visibilityState === 'hidden') {
+      const cropData = CROPS[cropType];
+      new Notification("Pocket Farm", {
+        body: `Your ${t(cropData.displayName)} is ready to harvest!`,
+        icon: "/favicon.ico",
+        tag: `crop-ready-${cropType}`
+      });
+    }
+  };
+
+  const collectAllReady = () => {
+    setGameState(prev => {
+      const newInventory = { ...prev.inventory };
+      let harvestedCount = 0;
+      const newPlots = prev.plots.map(plot => {
+        if (plot.isReady && plot.crop) {
+          const key = getInfusedCropKey(plot.crop, plot.infusions);
+          newInventory[key] = (newInventory[key] || 0) + 1;
+          harvestedCount++;
+          return { ...plot, crop: null, plantedAt: null, isReady: false, infusions: [] };
+        }
+        return plot;
+      });
+      return { 
+        ...prev, 
+        inventory: newInventory, 
+        plots: newPlots,
+        totalCropsHarvested: prev.totalCropsHarvested + harvestedCount
+      };
+    });
+    setShowOfflineModal(false);
+  };
+
+  // --- Game Loop ---
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setGameState(prev => {
+        let changed = false;
+        const now = Date.now();
+        const newPlots = prev.plots.map(plot => {
+          if (plot.crop && plot.plantedAt && !plot.isReady) {
+            const cropData = CROPS[plot.crop];
+            const effectiveGrowTime = prev.hasGrowthBoost ? cropData.growTime * 0.8 : cropData.growTime;
+            
+            // Roll for infusions during growth
+            const newInfusions = [...(plot.infusions || [])];
+            const chances: Record<InfusionType, number> = {
+              Lucky: 0.0005,
+              Corrupted: 0.0003,
+              Hollowed: 0.0003,
+              Darker: 0.0002,
+              Dragonic: 0.0001,
+              Radioactive: 0.00005,
+              Divine: 0.00001,
+              Random: 0,
+            };
+
+            (Object.keys(chances) as InfusionType[]).forEach(type => {
+              if (Math.random() < chances[type]) {
+                newInfusions.push(type);
+                changed = true;
+              }
+            });
+
+            if (now - plot.plantedAt >= effectiveGrowTime * 1000) {
+              changed = true;
+              sendNotification(plot.crop);
+              return { ...plot, isReady: true, infusions: newInfusions };
+            }
+
+            if (newInfusions.length !== (plot.infusions?.length || 0)) {
+              return { ...plot, infusions: newInfusions };
+            }
+          }
+          return plot;
+        });
+
+        // Auto-harvest logic
+        let newInventory = { ...prev.inventory };
+        let harvestedCount = 0;
+        let autoHarvestUntil = prev.autoHarvestUntil;
+        
+        // Clear expired auto-harvest
+        if (autoHarvestUntil && now >= autoHarvestUntil && !prev.permanentAutoHarvest) {
+          autoHarvestUntil = null;
+          changed = true;
+        }
+
+        const isAutoHarvestActive = (autoHarvestUntil && now < autoHarvestUntil) || prev.permanentAutoHarvest;
+
+        if (isAutoHarvestActive) {
+          newPlots.forEach((plot, idx) => {
+            if (plot.isReady && idx < prev.unlockedPlots) {
+              changed = true;
+              const cropType = plot.crop!;
+              const infusions = plot.infusions || [];
+              const key = getInfusedCropKey(cropType, infusions);
+              
+              newInventory[key] = (newInventory[key] || 0) + 1;
+              harvestedCount++;
+              newPlots[idx] = { ...plot, crop: null, plantedAt: null, isReady: false, infusions: [] };
+            }
+          });
+        }
+
+        if (changed) {
+          return { 
+            ...prev, 
+            plots: newPlots, 
+            inventory: newInventory,
+            autoHarvestUntil,
+            totalCropsHarvested: prev.totalCropsHarvested + harvestedCount
+          };
+        }
+        return prev;
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [notificationsEnabled]);
+
+  // --- Actions ---
+
+  const handlePlotInteract = (id: number) => {
+    if (id >= gameState.unlockedPlots) return;
+
+    const plot = gameState.plots[id];
+    const tool = gameState.activeTool;
+
+    if (tool === 'Hand') {
+      if (!plot.crop) {
+        setShowSeedSelector(id);
+      }
+    } else if (tool === 'Sickle') {
+      if (plot.isReady) {
+        const cropType = plot.crop!;
+        const infusions = plot.infusions || [];
+        const key = getInfusedCropKey(cropType, infusions);
+        const isCandy = cropType === 'Candy Cane';
+        
+        setGameState(prev => {
+          const prevTree = prev.christmasTree || {
+            unlockedBalls: [],
+            hungBalls: [],
+            challengesProgress: {},
+            santaVisited: false,
+            openedPresents: [],
+            rudolphClaimed: false,
+            seedsPlantedCount: 0,
+            candyCaneHarvested: 0,
+          };
+          return {
+            ...prev,
+            inventory: {
+              ...prev.inventory,
+              [key]: (prev.inventory[key] || 0) + 1
+            },
+            totalCropsHarvested: prev.totalCropsHarvested + 1,
+            christmasTree: {
+              ...prevTree,
+              candyCaneHarvested: (prevTree.candyCaneHarvested || 0) + (isCandy ? 1 : 0),
+            },
+            plots: prev.plots.map(p => p.id === id ? {
+              ...p,
+              crop: null,
+              plantedAt: null,
+              isReady: false,
+              infusions: []
+            } : p)
+          };
+        });
+      }
+    } else if (tool === 'Shovel') {
+      if (plot.crop) {
+        setGameState(prev => ({
+          ...prev,
+          plots: prev.plots.map(p => p.id === id ? {
+            ...p,
+            crop: null,
+            plantedAt: null,
+            isReady: false,
+            infusions: []
+          } : p)
+        }));
+      }
+    } else if (tool === 'Tonic') {
+      if (plot.crop && !plot.isReady) {
+        if (gameState.selectedTonic) {
+          const tonicType = gameState.selectedTonic;
+          if ((gameState.tonicInventory[tonicType] || 0) > 0) {
+            // Logic for Random Tonic
+            let infusionToApply: InfusionType = tonicType;
+            if (tonicType === 'Random') {
+              const availableInfusions: InfusionType[] = ['Lucky', 'Corrupted', 'Hollowed', 'Darker', 'Dragonic', 'Radioactive', 'Divine'];
+              infusionToApply = availableInfusions[Math.floor(Math.random() * availableInfusions.length)];
+            }
+
+            setGameState(prev => ({
+              ...prev,
+              tonicInventory: {
+                ...prev.tonicInventory,
+                [tonicType]: (prev.tonicInventory[tonicType] || 0) - 1
+              },
+              plots: prev.plots.map(p => p.id === id ? {
+                ...p,
+                infusions: [...(p.infusions || []), infusionToApply],
+                tonicApplied: true
+              } : p)
+            }));
+          } else {
+            // Out of stock, show inventory tonics tab
+            setPendingTonicPlotId(id);
+            setInventoryTab('tonics');
+            setShowInventory(true);
+          }
+        } else {
+          // No tonic selected, show inventory tonics tab
+          setPendingTonicPlotId(id);
+          setInventoryTab('tonics');
+          setShowInventory(true);
+        }
+      }
+    }
+  };
+
+  const plantSeed = (plotId: number, type: CropType) => {
+    if ((gameState.seedInventory[type] || 0) > 0) {
+      setGameState(prev => {
+        const prevTree = prev.christmasTree || {
+          unlockedBalls: [],
+          hungBalls: [],
+          challengesProgress: {},
+          santaVisited: false,
+          openedPresents: [],
+          rudolphClaimed: false,
+          seedsPlantedCount: 0,
+          candyCaneHarvested: 0,
+        };
+        return {
+          ...prev,
+          seedInventory: {
+            ...prev.seedInventory,
+            [type]: (prev.seedInventory[type] || 0) - 1
+          },
+          plots: prev.plots.map(p => p.id === plotId ? {
+            ...p,
+            crop: type,
+            plantedAt: Date.now(),
+            isReady: false,
+            infusions: []
+          } : p),
+          christmasTree: {
+            ...prevTree,
+            seedsPlantedCount: (prevTree.seedsPlantedCount || 0) + 1,
+          }
+        };
+      });
+      setShowSeedSelector(null);
+    }
+  };
+
+  const handleBuyCandyCaneSeed = () => {
+    const candyPrice = CROPS['Candy Cane']?.buyPrice || 150;
+    if (gameState.money >= candyPrice) {
+      setGameState(prev => ({
+        ...prev,
+        money: prev.money - candyPrice,
+        seedInventory: {
+          ...prev.seedInventory,
+          'Candy Cane': (prev.seedInventory['Candy Cane'] || 0) + 1,
+        }
+      }));
+      setEventToast("Purchased 1 Candy Cane Seed!");
+    } else {
+      setEventToast("Not enough coins to purchase Candy Cane Seed!");
+    }
+  };
+
+  const buySeed = (type: CropType) => {
+    const cropData = CROPS[type];
+    if (!cropData) return;
+    if (cropData.event && cropData.event !== activeEvent.id) {
+      setEventToast(`This seasonal seed is only available during the ${SEASONAL_EVENTS[cropData.event].name}!`);
+      return;
+    }
+    const currentBuyPrice = getCropBuyPrice(type, activeEvent.id);
+    if (gameState.money >= currentBuyPrice) {
+      setGameState(prev => ({
+        ...prev,
+        money: prev.money - currentBuyPrice,
+        seedInventory: {
+          ...prev.seedInventory,
+          [type]: (prev.seedInventory[type] || 0) + 1
+        }
+      }));
+    }
+  };
+
+  const buyTonic = (type: InfusionType) => {
+    if (!TONIC_PRICES) return;
+    const price = TONIC_PRICES[type];
+    if (price !== undefined && gameState.money >= price) {
+      setGameState(prev => ({
+        ...prev,
+        money: prev.money - price,
+        tonicInventory: {
+          ...prev.tonicInventory,
+          [type]: ((prev.tonicInventory && prev.tonicInventory[type]) || 0) + 1
+        }
+      }));
+    }
+  };
+
+  const buyPlot = () => {
+    if (gameState.money >= PLOT_COST && gameState.unlockedPlots < 16) {
+      setGameState(prev => ({
+        ...prev,
+        money: prev.money - PLOT_COST,
+        unlockedPlots: prev.unlockedPlots + 1
+      }));
+    }
+  };
+
+  const sellCrop = (inventoryKey: string) => {
+    const { type, infusions, isFavorite } = parseInfusedCropKey(inventoryKey);
+    if (isFavorite) return; // Cannot sell favorite
+    if ((gameState.inventory[inventoryKey] || 0) > 0) {
+      const cropData = CROPS[type];
+      if (!cropData) return;
+      const multiplier = getInfusionMultiplier(infusions);
+      const eventMultiplier = getEventCropMultiplier(type, activeEvent.id);
+      const baseSellPrice = getCropSellPrice(type, activeEvent.id);
+      const sunChillMultiplier = (gameState.summerNiro?.sunCoolBlessingUntil || 0) > Date.now() ? 1.5 : 1.0;
+      const finalPrice = Math.floor(baseSellPrice * multiplier * eventMultiplier * sunChillMultiplier);
+      
+      setGameState(prev => ({
+        ...prev,
+        money: prev.money + finalPrice,
+        totalMoneyEarned: prev.totalMoneyEarned + finalPrice,
+        inventory: {
+          ...prev.inventory,
+          [inventoryKey]: (prev.inventory[inventoryKey] || 0) - 1
+        }
+      }));
+    }
+  };
+
+  const sellAnimalProduct = (type: AnimalProductType) => {
+    if ((gameState.animalProductInventory[type] || 0) > 0) {
+      const productData = ANIMAL_PRODUCTS[type];
+      setGameState(prev => ({
+        ...prev,
+        money: prev.money + productData.sellPrice,
+        totalMoneyEarned: prev.totalMoneyEarned + productData.sellPrice,
+        animalProductInventory: {
+          ...prev.animalProductInventory,
+          [type]: (prev.animalProductInventory[type] || 0) - 1
+        }
+      }));
+    }
+  };
+
+  const sellAll = () => {
+    let totalEarnings = 0;
+    const sunChillMultiplier = (gameState.summerNiro?.sunCoolBlessingUntil || 0) > Date.now() ? 1.5 : 1.0;
+    
+    // Calculate crop earnings
+    Object.keys(gameState.inventory).forEach(key => {
+      const { type, infusions, isFavorite } = parseInfusedCropKey(key);
+      if (isFavorite) return; // Skip favorite
+      const count = gameState.inventory[key] || 0;
+      if (count > 0 && CROPS[type]) {
+        const multiplier = getInfusionMultiplier(infusions);
+        const eventMultiplier = getEventCropMultiplier(type, activeEvent.id);
+        const baseSellPrice = getCropSellPrice(type, activeEvent.id);
+        totalEarnings += count * Math.floor(baseSellPrice * multiplier * eventMultiplier * sunChillMultiplier);
+      }
+    });
+
+    // Calculate animal product earnings
+    (Object.keys(gameState.animalProductInventory) as AnimalProductType[]).forEach(type => {
+      const count = gameState.animalProductInventory[type] || 0;
+      if (count > 0) {
+        totalEarnings += count * ANIMAL_PRODUCTS[type].sellPrice;
+      }
+    });
+
+    if (totalEarnings > 0) {
+      setGameState(prev => {
+        const newInventory = { ...prev.inventory };
+        const newAnimalProductInventory = { ...prev.animalProductInventory };
+        
+        // Clear inventories (except favorite)
+        Object.keys(newInventory).forEach(key => {
+          const { isFavorite } = parseInfusedCropKey(key);
+          if (!isFavorite) {
+            newInventory[key] = 0;
+          }
+        });
+        Object.keys(newAnimalProductInventory).forEach(key => {
+          newAnimalProductInventory[key as AnimalProductType] = 0;
+        });
+
+        return {
+          ...prev,
+          money: prev.money + totalEarnings,
+          totalMoneyEarned: prev.totalMoneyEarned + totalEarnings,
+          inventory: newInventory,
+          animalProductInventory: newAnimalProductInventory
+        };
+      });
+      
+      setSellAllFeedback(`Sold all items for £${formatNumberShort(totalEarnings)}`);
+      setTimeout(() => setSellAllFeedback(null), 3000);
+    }
+    
+    setShowSellAllConfirm(false);
+  };
+
+  // Niro's Panache Blender Handler - Mix 10 distinct fruits and cool down the sun
+  const handleBlendAndCoolSun = (usedFruits: CropType[]) => {
+    setGameState(prev => {
+      const newInventory = { ...prev.inventory };
+      
+      // Deduct 1 of each of the 10 distinct fruits
+      usedFruits.forEach(fruitType => {
+        const matchingKeys = Object.keys(newInventory).filter(k => {
+          const { type } = parseInfusedCropKey(k);
+          return type === fruitType && (newInventory[k] || 0) > 0;
+        });
+
+        // Prioritize non-favorite first, then lowest number of infusions
+        matchingKeys.sort((a, b) => {
+          const parsedA = parseInfusedCropKey(a);
+          const parsedB = parseInfusedCropKey(b);
+          if (parsedA.isFavorite !== parsedB.isFavorite) {
+            return parsedA.isFavorite ? 1 : -1;
+          }
+          return parsedA.infusions.length - parsedB.infusions.length;
+        });
+
+        if (matchingKeys.length > 0) {
+          const targetKey = matchingKeys[0];
+          newInventory[targetKey] = (newInventory[targetKey] || 0) - 1;
+          if (newInventory[targetKey] <= 0) {
+            delete newInventory[targetKey];
+          }
+        }
+      });
+
+      const currentTimesCooled = prev.summerNiro?.timesCooled || 0;
+      const coinReward = 25000 + (currentTimesCooled * 5000);
+      const newSeedInventory = { ...prev.seedInventory };
+      newSeedInventory['Pineapple'] = (newSeedInventory['Pineapple'] || 0) + 3;
+      newSeedInventory['Melon'] = (newSeedInventory['Melon'] || 0) + 3;
+      newSeedInventory['Banana'] = (newSeedInventory['Banana'] || 0) + 3;
+
+      return {
+        ...prev,
+        money: prev.money + coinReward,
+        totalMoneyEarned: prev.totalMoneyEarned + coinReward,
+        inventory: newInventory,
+        seedInventory: newSeedInventory,
+        summerNiro: {
+          timesCooled: currentTimesCooled + 1,
+          totalPanachesBlended: (prev.summerNiro?.totalPanachesBlended || 0) + 1,
+          sunChillLevel: 100,
+          lastCooledAt: Date.now(),
+          sunCoolBlessingUntil: Date.now() + 15 * 60 * 1000, // 15 mins blessing
+        }
+      };
+    });
+
+    setEventToast(`The Sun is cooled! ☀️➡️😎 Niro granted +£25K & 9 Summer Seeds!`);
+    setTimeout(() => setEventToast(null), 5000);
+  };
+
+  const toggleFavorite = (key: string) => {
+    const { type, infusions, isFavorite } = parseInfusedCropKey(key);
+    
+    setGameState(prev => {
+      const newInventory = { ...prev.inventory };
+      const currentCount = newInventory[key] || 0;
+      
+      if (currentCount <= 0) return prev;
+
+      // Decrement current stack
+      if (currentCount === 1) {
+        delete newInventory[key];
+      } else {
+        newInventory[key] = currentCount - 1;
+      }
+
+      // Toggle favorite status for the ONE item
+      const newKey = getInfusedCropKey(type, infusions, !isFavorite);
+      newInventory[newKey] = (newInventory[newKey] || 0) + 1;
+
+      return {
+        ...prev,
+        inventory: newInventory
+      };
+    });
+  };
+
+  const activateAutoHarvest = () => {
+    // Simulate ad watch
+    const confirm = window.confirm("Watch a quick ad to activate 1-hour Auto-Harvest?");
+    if (confirm) {
+      setGameState(prev => ({
+        ...prev,
+        autoHarvestUntil: Date.now() + AUTO_HARVEST_DURATION
+      }));
+    }
+  };
+
+  const buyPremiumPack = () => {
+    setGameState(prev => {
+      if (prev.hasPremiumPack) return prev;
+
+      const newUnlockedPlots = Math.min(16, prev.unlockedPlots + 2);
+      const newAnimalInventory = { ...prev.animalInventory };
+      (Object.keys(ANIMALS) as AnimalType[]).forEach(type => {
+        newAnimalInventory[type] = (newAnimalInventory[type] || 0) + 1;
+      });
+
+      return {
+        ...prev,
+        money: prev.money + 300,
+        unlockedPlots: newUnlockedPlots,
+        animalAreaUnlocked: true,
+        animalInventory: newAnimalInventory,
+        hasPremiumPack: true,
+        permanentAutoHarvest: true,
+        hasGrowthBoost: true
+      };
+    });
+  };
+
+  const getTimeRemaining = (until: number) => {
+    const remaining = until - Date.now();
+    if (remaining <= 0) return null;
+    const mins = Math.floor(remaining / 60000);
+    const secs = Math.floor((remaining % 60000) / 1000);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const handleSpin = () => {
+    if (gameState.money < 250) return;
+
+    setGameState(prev => ({ ...prev, money: prev.money - 250 }));
+
+    // Rarity weights
+    const rand = Math.random() * 100;
+    let rarity: Rarity = 'NR';
+    if (rand < 0.1) rarity = 'Celestial';
+    else if (rand < 1) rarity = 'Divine';
+    else if (rand < 4) rarity = 'Secret';
+    else if (rand < 10) rarity = 'Myth';
+    else if (rand < 20) rarity = 'Legendary';
+    else if (rand < 50) rarity = 'MID';
+    else rarity = 'NR';
+
+    const possibleCrops = (Object.keys(CROPS) as CropType[]).filter(type => CROPS[type].rarity === rarity);
+    const wonCrop = possibleCrops[Math.floor(Math.random() * possibleCrops.length)];
+
+    setGameState(prev => ({
+      ...prev,
+      seedInventory: {
+        ...prev.seedInventory,
+        [wonCrop]: (prev.seedInventory[wonCrop] || 0) + 1
+      }
+    }));
+
+    setSpinResult(wonCrop);
+    setShowRoyMenu(false);
+  };
+
+  const [timeStr, setTimeStr] = useState<string | null>(null);
+  useEffect(() => {
+    const update = () => {
+      if (gameState.permanentAutoHarvest) {
+        setTimeStr(null);
+      } else if (gameState.autoHarvestUntil) {
+        const remaining = getTimeRemaining(gameState.autoHarvestUntil);
+        setTimeStr(remaining);
+      } else {
+        setTimeStr(null);
+      }
+    };
+    update();
+    const t = setInterval(update, 1000);
+    return () => clearInterval(t);
+  }, [gameState.autoHarvestUntil, gameState.permanentAutoHarvest]);
+
+  // --- Animal Production ---
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setGameState(prev => {
+        let updated = false;
+        const newCages = prev.cages.map(cage => {
+          if (cage.type && cage.count > 0) {
+            const animalData = ANIMALS[cage.type];
+            const now = Date.now();
+            const lastProd = cage.lastProduction || now;
+            const elapsed = (now - lastProd) / 1000;
+            
+            if (elapsed >= animalData.productionTime) {
+              updated = true;
+              return { ...cage, lastProduction: now };
+            }
+          }
+          return cage;
+        });
+
+        if (updated) {
+          const newProductInventory = { ...prev.animalProductInventory };
+          prev.cages.forEach((cage, index) => {
+            const newCage = newCages[index];
+            if (newCage.lastProduction !== cage.lastProduction && newCage.type) {
+              const animalData = ANIMALS[newCage.type];
+              const productType = animalData.product;
+              newProductInventory[productType] = (newProductInventory[productType] || 0) + newCage.count;
+            }
+          });
+          return { ...prev, cages: newCages, animalProductInventory: newProductInventory };
+        }
+        return prev;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const buyAnimalArea = () => {
+    if (gameState.money >= ANIMAL_AREA_COST && !gameState.animalAreaUnlocked) {
+      setGameState(prev => ({
+        ...prev,
+        money: prev.money - ANIMAL_AREA_COST,
+        animalAreaUnlocked: true
+      }));
+    }
+  };
+
+  const buyAnimal = (type: AnimalType) => {
+    const animalData = ANIMALS[type];
+    if (animalData.eventOnly) return;
+    if (gameState.money >= animalData.buyPrice) {
+      setGameState(prev => ({
+        ...prev,
+        money: prev.money - animalData.buyPrice,
+        animalInventory: {
+          ...prev.animalInventory,
+          [type]: (prev.animalInventory[type] || 0) + 1
+        }
+      }));
+    }
+  };
+
+  const buyCage = () => {
+    if (gameState.money >= CAGE_COST && gameState.unlockedCages < MAX_CAGES) {
+      setGameState(prev => ({
+        ...prev,
+        money: prev.money - CAGE_COST,
+        unlockedCages: prev.unlockedCages + 1
+      }));
+    }
+  };
+
+  const placeAnimal = (cageId: number, type: AnimalType) => {
+    const cage = gameState.cages[cageId];
+    const inventoryCount = gameState.animalInventory[type] || 0;
+
+    if (inventoryCount > 0) {
+      const canPlace = !cage.type || (cage.type === type && cage.count < 2);
+      
+      if (canPlace) {
+        setGameState(prev => ({
+          ...prev,
+          animalInventory: {
+            ...prev.animalInventory,
+            [type]: inventoryCount - 1
+          },
+          cages: prev.cages.map(c => c.id === cageId ? {
+            ...c,
+            type: type,
+            count: c.count + 1,
+            lastProduction: c.count === 0 ? Date.now() : c.lastProduction
+          } : c)
+        }));
+        setShowAnimalSelector(null);
+      }
+    }
+  };
+
+  const removeAnimalFromCage = (cageId: number, removeAll: boolean = false) => {
+    const cage = gameState.cages[cageId];
+    if (!cage || !cage.type || cage.count <= 0) return;
+
+    const currentType = cage.type;
+    const amountToRemove = removeAll ? cage.count : 1;
+    const newCount = Math.max(0, cage.count - amountToRemove);
+    const newType = newCount === 0 ? null : currentType;
+
+    setGameState(prev => ({
+      ...prev,
+      animalInventory: {
+        ...prev.animalInventory,
+        [currentType]: (prev.animalInventory[currentType] || 0) + amountToRemove
+      },
+      cages: prev.cages.map(c => c.id === cageId ? {
+        ...c,
+        type: newType,
+        count: newCount,
+        lastProduction: newCount === 0 ? Date.now() : c.lastProduction
+      } : c)
+    }));
+  };
+
+  const hasSellableItems = Object.keys(gameState.inventory).some(key => {
+    const { isFavorite } = parseInfusedCropKey(key);
+    return !isFavorite && (gameState.inventory[key] || 0) > 0;
+  }) || (Object.values(gameState.animalProductInventory) as number[]).some(count => (count || 0) > 0);
+
+  // --- Render Helpers ---
+
+  return (
+    <div className={`min-h-screen ${gameState.darkMode ? 'dark bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-800'} font-sans selection:bg-green-100 selection:text-green-700`}>
+      <MusicManager 
+        musicVolume={gameState.musicVolume || 0.5} 
+        isMusicPlaying={gameState.isMusicPlaying || false} 
+        customMusicData={gameState.customMusicData || null} 
+        musicKey={gameState.musicKey || 0}
+      />
+      <AnimatePresence mode="wait">
+        {screen === 'menu' ? (
+          <motion.div 
+            key="menu-screen"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="min-h-screen bg-green-100 flex flex-col items-center justify-center p-6 text-center"
+          >
+            <motion.div 
+              initial={{ y: -20, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              className="mb-12"
+            >
+              <div className="bg-white p-6 rounded-3xl shadow-xl border-4 border-green-600 mb-4 inline-block">
+                <Sprout size={80} className="text-green-600" />
+              </div>
+              <h1 className="text-5xl font-black text-green-800 tracking-tight">Pocket Farm</h1>
+              <p className="text-green-700 font-medium mt-2">{t('subtitle')}</p>
+            </motion.div>
+
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => setScreen('farm')}
+              className="bg-green-600 text-white px-12 py-4 rounded-full text-2xl font-bold shadow-lg flex items-center gap-3"
+            >
+              <Play fill="currentColor" /> {t('play')}
+            </motion.button>
+          </motion.div>
+        ) : (
+          <motion.div 
+            key="farm-screen"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="min-h-screen bg-amber-50 flex flex-col max-w-md mx-auto relative overflow-hidden font-sans text-slate-800"
+          >
+            {/* Header */}
+            <header className="bg-white p-4 shadow-sm flex items-center justify-between sticky top-0 z-20" dir={gameState.language === 'ar' || gameState.language === 'ur' ? 'rtl' : 'ltr'}>
+        <div className="flex items-center gap-2 bg-amber-100 px-3 py-1.5 rounded-full border border-amber-200 shrink-0">
+          <Coins className="text-amber-600" size={20} />
+          {gameState.money >= 1000000 ? (
+            <button 
+              onClick={() => setShowFullMoney(true)}
+              className="flex items-center justify-center p-1 hover:bg-amber-200 rounded-full transition-colors active:scale-95"
+              title="View full balance"
+            >
+              <Wallet className="text-amber-700" size={18} />
+            </button>
+          ) : (
+            <span className="font-bold text-base md:text-lg">£{formatNumberShort(gameState.money)}</span>
+          )}
+        </div>
+        <h2 className="font-black text-lg md:text-xl text-green-700 italic truncate mx-2 flex-1 text-center">Pocket Farm</h2>
+        <div className="flex items-center gap-1">
+          <button 
+            onClick={() => setShowSettings(true)}
+            className="p-2 text-slate-400 hover:text-slate-600 transition-colors"
+          >
+            <Settings size={22} />
+          </button>
+          <button 
+            onClick={() => setScreen('menu')}
+            className="p-2 text-slate-400 hover:text-slate-600 transition-colors"
+          >
+            <X size={22} />
+          </button>
+        </div>
+      </header>
+
+      {/* Animals Button */}
+      {gameState.animalAreaUnlocked && (
+          <motion.button
+            key="animals-button"
+            initial={{ x: 20, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            onClick={() => setShowAnimalScreen(true)}
+            className="absolute top-[4.25rem] right-4 z-30 bg-purple-600 text-white py-2 px-3 sm:py-2.5 sm:px-3.5 rounded-2xl shadow-lg border-2 border-purple-400 flex items-center gap-2 font-black text-sm"
+          >
+            <PawPrint size={18} />
+            <span>{t('animals')}</span>
+          </motion.button>
+      )}
+
+      {/* Left Top HUD: Roy & Seasonal Guide NPC Buttons */}
+      <div className="absolute top-[4.25rem] left-4 z-30 flex flex-col gap-1.5 items-start">
+        {/* Roy NPC Button */}
+        <motion.button
+          key="roy-npc-button"
+          initial={{ x: -20, opacity: 0 }}
+          animate={{ x: 0, opacity: 1 }}
+          onClick={() => setShowRoyMenu(true)}
+          className="bg-amber-500 text-white py-2 px-3 rounded-2xl shadow-lg border-2 border-amber-300 flex items-center gap-2 font-black text-sm"
+        >
+          <div className="w-5 h-5 bg-white rounded-full flex items-center justify-center text-amber-600">
+            <User size={14} />
+          </div>
+          <span>{t('roy')}</span>
+        </motion.button>
+
+        {/* Markman NPC Button (Christmas Guide - Only visible during Christmas Event) */}
+        {activeEvent.id === 'christmas' && (
+          <motion.button
+            key="markman-npc-button"
+            initial={{ x: -20, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            exit={{ x: -20, opacity: 0 }}
+            onClick={() => setShowMarkmanModal(true)}
+            className="bg-gradient-to-r from-emerald-600 to-teal-700 text-white py-1.5 px-2.5 sm:py-2 sm:px-3 rounded-2xl shadow-lg border-2 border-emerald-400/80 flex items-center gap-1.5 font-black text-xs hover:brightness-110 active:scale-95 transition-all"
+          >
+            <span className="text-base">🎄</span>
+            <span>{t('markman')}</span>
+            <span className="text-[10px] bg-red-600 text-white font-black px-1.5 py-0.5 rounded-full shadow-xs">
+              {(gameState.christmasTree?.hungBalls || []).length}/10
+            </span>
+          </motion.button>
+        )}
+
+        {/* Niro NPC Button (Summer Event) */}
+        {activeEvent.id === 'summer' && (
+          <motion.button
+            key="niro-npc-button"
+            initial={{ x: -20, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            exit={{ x: -20, opacity: 0 }}
+            onClick={() => setShowNiroModal(true)}
+            className="bg-gradient-to-r from-amber-500 via-orange-500 to-yellow-500 text-slate-950 py-1.5 px-2.5 sm:py-2 sm:px-3 rounded-2xl shadow-lg border-2 border-amber-300 flex items-center gap-1.5 font-black text-xs hover:brightness-110 active:scale-95 transition-all cursor-pointer"
+          >
+            <span className="text-base">🍹</span>
+            <span>{t('niro') || 'Niro'}</span>
+          </motion.button>
+        )}
+
+        {/* Rayan NPC Button (Ramadan Event) */}
+        {activeEvent.id === 'ramadan' && (
+          <motion.button
+            key="rayan-npc-button"
+            initial={{ x: -20, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            exit={{ x: -20, opacity: 0 }}
+            onClick={() => setShowRayanModal(true)}
+            className="bg-gradient-to-r from-emerald-700 via-teal-700 to-emerald-800 text-white py-1.5 px-2.5 sm:py-2 sm:px-3 rounded-2xl shadow-lg border-2 border-amber-400/80 flex items-center gap-1.5 font-black text-xs hover:brightness-110 active:scale-95 transition-all cursor-pointer"
+          >
+            <span className="text-base">🌙</span>
+            <span>{t('rayan') || 'Rayan'}</span>
+            <span className="text-[10px] bg-amber-400 text-slate-950 font-black px-1.5 py-0.5 rounded-full shadow-xs">
+              {(gameState.ramadanRayan?.completedMeals || []).length}/10
+            </span>
+          </motion.button>
+        )}
+
+
+      </div>
+
+      {/* Auto Harvest Indicator */}
+      <AnimatePresence>
+        {(gameState.permanentAutoHarvest || (gameState.autoHarvestUntil && gameState.autoHarvestUntil > Date.now())) && (
+          <motion.div
+            key="auto-harvest-indicator"
+            initial={{ y: -20, opacity: 0, x: '-50%' }}
+            animate={{ y: 0, opacity: 1, x: '-50%' }}
+            exit={{ y: -20, opacity: 0, x: '-50%' }}
+            className="absolute top-[4.25rem] left-1/2 z-30 bg-green-50 text-green-700 px-4 py-1.5 rounded-full shadow-md border border-green-200 flex items-center gap-2 font-black text-[10px] whitespace-nowrap"
+          >
+            <Zap size={12} className="fill-green-500 animate-pulse" />
+            <span>
+              {t('auto_harvest')}: {gameState.permanentAutoHarvest ? t('active') : (timeStr || '...')}
+            </span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Event Toast Notification */}
+      <AnimatePresence>
+        {eventToast && (
+          <motion.div
+            key="event-toast-notification"
+            initial={{ opacity: 0, y: -20, x: '-50%' }}
+            animate={{ opacity: 1, y: 0, x: '-50%' }}
+            exit={{ opacity: 0, y: -20, x: '-50%' }}
+            className="fixed top-24 left-1/2 z-[120] max-w-xs w-full bg-slate-900 text-white px-4 py-2.5 rounded-2xl shadow-xl flex items-center justify-between text-xs border border-slate-700"
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-lg">✨</span>
+              <span className="font-bold">{eventToast}</span>
+            </div>
+            <button onClick={() => setEventToast(null)} className="p-1 hover:bg-slate-800 rounded-full">
+              <X size={14} />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Main Farm Area */}
+      <main className="flex-1 p-4 flex flex-col items-center justify-center overflow-hidden">
+        <motion.div 
+          layout
+          className={`grid gap-3 w-full max-w-sm mx-auto ${
+            gameState.unlockedPlots <= 4 ? 'grid-cols-2' : 
+            gameState.unlockedPlots <= 9 ? 'grid-cols-3' : 'grid-cols-4'
+          }`}
+        >
+          {gameState.plots.slice(0, gameState.unlockedPlots).map((plot) => (
+            <motion.div key={`plot-container-${plot.id}`} layout className="w-full aspect-square">
+              <Plot 
+                plot={plot} 
+                activeTool={gameState.activeTool} 
+                onInteract={handlePlotInteract}
+                hasGrowthBoost={gameState.hasGrowthBoost}
+                unlockedPlots={gameState.unlockedPlots}
+              />
+            </motion.div>
+          ))}
+        </motion.div>
+      </main>
+
+      {/* Bottom Tab Bar */}
+      <div className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white border-t border-slate-100 shadow-[0_-4px_15px_rgba(0,0,0,0.1)] z-40 h-20">
+        <div className="grid grid-cols-3 h-full items-center px-4 relative">
+          
+          {/* Inventory Tab */}
+          <button 
+            onClick={() => setShowInventory(true)}
+            className="flex flex-col items-center gap-1 text-amber-600 hover:text-amber-700 transition-all active:scale-90"
+          >
+            <Package size={24} />
+            <span className="text-[10px] font-bold uppercase tracking-wider">{t('inventory')}</span>
+          </button>
+
+          {/* Middle: Tool Button */}
+          <div className="flex flex-col items-center justify-center relative h-full">
+            <AnimatePresence>
+              {toolsExpanded && (
+                <motion.div 
+                  key="tools-expanded-panel"
+                  initial={{ opacity: 0, y: 20, scale: 0.8 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 20, scale: 0.8 }}
+                  className="absolute bottom-24 left-1/2 -translate-x-1/2 flex flex-row gap-3 bg-white p-3 rounded-3xl shadow-2xl border border-slate-100 z-50"
+                >
+                  {(['Hand', 'Sickle', 'Shovel', 'Tonic'] as ToolType[]).map(tool => (
+                    <button
+                      key={`tool-option-${tool}`}
+                      onClick={() => {
+                        setGameState(prev => ({ ...prev, activeTool: tool }));
+                        setToolsExpanded(false);
+                        if (tool === 'Tonic') {
+                          setInventoryTab('tonics');
+                          setShowInventory(true);
+                        }
+                      }}
+                      className={`w-14 h-14 rounded-2xl flex items-center justify-center transition-all ${
+                        gameState.activeTool === tool 
+                          ? 'bg-green-600 text-white shadow-lg' 
+                          : 'bg-slate-50 text-slate-400 hover:bg-slate-100'
+                      }`}
+                    >
+                      {tool === 'Hand' && <Hand size={28} />}
+                      {tool === 'Sickle' && <Sprout size={28} />}
+                      {tool === 'Shovel' && <Trash2 size={28} />}
+                      {tool === 'Tonic' && <FlaskConical size={28} />}
+                    </button>
+                  ))}
+                </motion.div>
+              )}
+            </AnimatePresence>
+            
+            <div className="relative -mt-10 flex flex-col items-center">
+              <button 
+                onClick={() => setToolsExpanded(!toolsExpanded)}
+                className="w-16 h-16 bg-green-600 rounded-full shadow-xl flex items-center justify-center text-white border-4 border-white relative z-50 transition-transform active:scale-95"
+              >
+                {gameState.activeTool === 'Hand' && <Hand size={30} />}
+                {gameState.activeTool === 'Sickle' && <Sprout size={30} />}
+                {gameState.activeTool === 'Shovel' && <Trash2 size={30} />}
+                {gameState.activeTool === 'Tonic' && <FlaskConical size={30} />}
+                <div className="absolute -top-1 -right-1 bg-white rounded-full p-1 shadow-md">
+                  {toolsExpanded ? <ChevronDown size={12} className="text-slate-400" /> : <ChevronUp size={12} className="text-slate-400" />}
+                </div>
+              </button>
+              <div className="mt-2 bg-white px-2 py-0.5 rounded-full shadow-sm border border-slate-50 flex items-center gap-1">
+                <span className="text-[10px] font-black text-green-700 uppercase tracking-widest">{t(gameState.activeTool)}</span>
+                {gameState.activeTool === 'Tonic' && gameState.selectedTonic && (
+                  <span className="text-[10px] font-bold text-purple-600 border-l border-slate-200 pl-1">
+                    {TONICS?.[gameState.selectedTonic]?.icon || '🧪'}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Shop Tab */}
+          <button 
+            onClick={() => setShowShop(true)}
+            className="flex flex-col items-center gap-1 text-green-600 hover:text-green-700 transition-all active:scale-90"
+          >
+            <ShoppingBasket size={24} />
+            <span className="text-[10px] font-bold uppercase tracking-wider">{t('shop')}</span>
+          </button>
+        </div>
+      </div>
+    </motion.div>
+  )}
+</AnimatePresence>
+
+      {/* Modals */}
+      <AnimatePresence>
+        {/* Tonic Selector */}
+        {showTonicSelector !== null && (
+          <motion.div 
+            key="tonic-selector-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-6"
+            onClick={() => setShowTonicSelector(null)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-white w-full max-w-xs rounded-[2rem] p-6 shadow-2xl"
+              onClick={e => e.stopPropagation()}
+            >
+              <h3 className="text-xl font-black text-slate-800 mb-4 text-center">Select a Tonic</h3>
+              <div className="grid grid-cols-1 gap-3 max-h-[50vh] overflow-y-auto pr-2">
+                {(gameState.tonicInventory && TONICS ? (Object.keys(gameState.tonicInventory) as InfusionType[]) : []).map(type => {
+                  const count = gameState.tonicInventory[type] || 0;
+                  if (count === 0) return null;
+                  const tonic = TONICS?.[type];
+                  const infusion = INFUSIONS?.[type];
+                  if (!tonic) return null;
+                  
+                  return (
+                    <button
+                      key={`tonic-option-${type}`}
+                      onClick={() => {
+                        setGameState(prev => ({ ...prev, selectedTonic: type }));
+                        setShowTonicSelector(null);
+                        // After selecting, apply it to the plot
+                        handlePlotInteract(showTonicSelector!);
+                      }}
+                      className="flex items-center justify-between p-3 rounded-2xl border-2 border-purple-50 bg-purple-50 hover:border-purple-200 transition-all group"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="p-2 bg-white rounded-xl shadow-sm relative">
+                          <span className="text-3xl">{tonic.icon || '🧪'}</span>
+                          <div className="absolute -bottom-1 -right-1 bg-purple-100 rounded-full p-1 border border-purple-200">
+                            <span className="text-[10px]">{infusion?.icon || '?'}</span>
+                          </div>
+                        </div>
+                        <div className="text-left">
+                          <p className="font-bold text-slate-800">{t(tonic.displayName)}</p>
+                          <p className="text-xs text-slate-500">{t('in_stock')}: {count}</p>
+                        </div>
+                      </div>
+                      <Check className="text-purple-600" size={20} />
+                    </button>
+                  );
+                })}
+                {(!gameState.tonicInventory || Object.values(gameState.tonicInventory).every(v => v === 0)) && (
+                  <div className="py-8 text-center">
+                    <p className="text-slate-400 font-medium mb-4">{t('empty_inventory_msg')}</p>
+                    <button 
+                      onClick={() => {
+                        setShowTonicSelector(null);
+                        setShopTab('tonics');
+                        setShowShop(true);
+                      }}
+                      className="bg-purple-600 text-white px-6 py-2 rounded-xl font-bold shadow-md"
+                    >
+                      {t('shop')}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+        {showSeedSelector !== null && (
+          <motion.div 
+            key="seed-selector-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-6"
+            onClick={() => setShowSeedSelector(null)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-white w-full max-w-xs rounded-[2rem] p-6 shadow-2xl"
+              onClick={e => e.stopPropagation()}
+            >
+              <h3 className="text-xl font-black text-slate-800 mb-4 text-center">{t('plant')}</h3>
+              <div className="grid grid-cols-1 gap-3 max-h-[50vh] overflow-y-auto pr-2">
+                {sortCrops(Object.keys(CROPS), activeEvent.id).map(key => {
+                  const type = key as CropType;
+                  const count = gameState.seedInventory[type] || 0;
+                  const crop = CROPS[type];
+                  if (count === 0) return null;
+                  return (
+                    <button
+                      key={`seed-option-${type}`}
+                      onClick={() => plantSeed(showSeedSelector!, type)}
+                      className={`flex items-center justify-between p-3 rounded-2xl border-2 transition-all group relative ${
+                        crop.rarity === 'Secret' ? 'bg-black border-slate-800 hover:border-purple-900' : 
+                        crop.rarity === 'Divine' ? 'bg-amber-400 border-amber-300 hover:border-amber-200' : 
+                        crop.rarity === 'Celestial' ? 'bg-sky-50 border-sky-300 hover:border-sky-400' : 
+                        'bg-green-50 border-green-100 hover:border-green-300'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="relative">
+                          <RarityEffect rarity={crop.rarity} className="p-1">
+                            <IconRenderer 
+                              icon={crop.icon} 
+                              className="w-full h-full text-3xl" 
+                              containerClassName="w-12 h-12" 
+                            />
+                          </RarityEffect>
+                        </div>
+                        <div className="text-left">
+                          <div className="flex items-center gap-1">
+                            <p className={`font-bold ${
+                              crop.rarity === 'Secret' ? 'text-purple-500' : 
+                              crop.rarity === 'Divine' ? 'text-white' : 
+                              crop.rarity === 'Celestial' ? 'text-sky-800' : 
+                              'text-slate-800'
+                            }`}>
+                              {t(crop.displayName)}
+                            </p>
+                          </div>
+                          <p className={`text-xs ${
+                            crop.rarity === 'Secret' ? 'text-slate-400' : 
+                            crop.rarity === 'Divine' ? 'text-amber-100' : 
+                            crop.rarity === 'Celestial' ? 'text-sky-600' : 
+                            'text-slate-500'
+                          }`}>
+                            {count} seeds
+                          </p>
+                        </div>
+                      </div>
+                      <Check className="text-green-600" size={20} />
+                      
+                      {/* Tooltip */}
+                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-32 p-2 bg-slate-900 text-white text-[10px] rounded-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-10 shadow-xl">
+                        <div className="font-bold text-amber-400 mb-1">{crop.rarity}</div>
+                        {crop.bonus && <div className="italic opacity-80">{crop.bonus}</div>}
+                      </div>
+                    </button>
+                  );
+                })}
+                {Object.values(gameState.seedInventory).every(c => !c || (typeof c === 'number' && c <= 0)) && (
+                  <div className="py-8 text-center text-slate-400 font-medium">
+                    No seeds in inventory!
+                  </div>
+                )}
+              </div>
+              <button 
+                onClick={() => setShowSeedSelector(null)}
+                className="w-full mt-6 py-3 bg-slate-100 text-slate-600 rounded-xl font-bold"
+              >
+                Cancel
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {showShop && (
+          <motion.div 
+            key="shop-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/40 z-50 flex items-end justify-center p-4"
+            onClick={() => setShowShop(false)}
+          >
+            <motion.div 
+              initial={{ y: 100 }}
+              animate={{ y: 0 }}
+              exit={{ y: 100 }}
+              className="bg-white w-full max-w-md rounded-[2.5rem] p-6 shadow-2xl h-[80vh] flex flex-col"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex justify-between items-center mb-6 shrink-0">
+                <div className="flex items-center gap-3">
+                  <h3 className="text-2xl font-black text-slate-800">{t('shop')}</h3>
+                  <div className="flex bg-slate-100 p-1 rounded-xl">
+                    <button 
+                      onClick={() => setShopTab('seeds')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-black transition-all ${
+                        shopTab === 'seeds' ? 'bg-white text-green-600 shadow-sm' : 'text-slate-400'
+                      }`}
+                    >
+                      {t('fruits')}
+                    </button>
+                    <button 
+                      onClick={() => setShopTab('tonics')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-black transition-all ${
+                        shopTab === 'tonics' ? 'bg-white text-purple-600 shadow-sm' : 'text-slate-400'
+                      }`}
+                    >
+                      {t('tonics')}
+                    </button>
+                  </div>
+                  <button 
+                    onClick={() => setShowPremiumPackInfo(true)}
+                    className="p-2 bg-amber-100 text-amber-600 rounded-full hover:bg-amber-200 transition-colors"
+                  >
+                    <Gift size={20} />
+                  </button>
+                </div>
+                <button onClick={() => setShowShop(false)} className="p-2 bg-slate-100 rounded-full"><X size={20}/></button>
+              </div>
+              
+              <div className="flex-1 overflow-y-auto pr-2 space-y-8">
+                {shopTab === 'seeds' ? (
+                  <>
+                    {/* Top Area: Quick Actions */}
+                    <div className="grid grid-cols-3 gap-2">
+                      <button 
+                        onClick={buyPlot}
+                        disabled={gameState.money < PLOT_COST || gameState.unlockedPlots >= 16}
+                        className="flex flex-col items-center justify-center p-3 bg-amber-50 rounded-2xl border border-amber-100 disabled:opacity-50"
+                      >
+                        <Sprout size={20} className="text-amber-600 mb-1" />
+                        <span className="text-[10px] font-black text-amber-800 uppercase">{t('plot')}</span>
+                        <span className="text-[9px] font-bold text-amber-600">£{formatNumberShort(PLOT_COST)}</span>
+                      </button>
+
+                      <button 
+                        onClick={buyAnimalArea}
+                        disabled={gameState.money < ANIMAL_AREA_COST || gameState.animalAreaUnlocked}
+                        className="flex flex-col items-center justify-center p-3 bg-purple-50 rounded-2xl border border-purple-100 disabled:opacity-50"
+                      >
+                        <PawPrint size={20} className="text-purple-600 mb-1" />
+                        <span className="text-[10px] font-black text-purple-800 uppercase">{t('animals')}</span>
+                        <span className="text-[9px] font-bold text-purple-600">
+                          {gameState.animalAreaUnlocked ? t('owned') : `£${ANIMAL_AREA_COST}`}
+                        </span>
+                      </button>
+
+                      <button 
+                        onClick={() => setShowAutoHarvestInfo(true)}
+                        className={`flex flex-col items-center justify-center p-3 rounded-2xl border transition-all ${
+                          gameState.permanentAutoHarvest ? 'bg-green-50 border-green-100' : 'bg-blue-50 border-blue-100'
+                        }`}
+                      >
+                        <Zap size={20} className={gameState.permanentAutoHarvest ? 'text-green-600 mb-1' : 'text-blue-600 mb-1'} />
+                        <span className={`text-[10px] font-black uppercase ${gameState.permanentAutoHarvest ? 'text-green-800' : 'text-blue-800'}`}>
+                          {t('auto')}
+                        </span>
+                        <span className={`text-[9px] font-bold ${gameState.permanentAutoHarvest ? 'text-green-600' : 'text-blue-600'}`}>
+                          {gameState.permanentAutoHarvest ? t('active') : t('boost')}
+                        </span>
+                      </button>
+                    </div>
+
+                    {/* Seeds Section */}
+                    <div>
+                      <div className="flex items-center justify-between mb-4">
+                        <h4 className="text-sm font-black text-slate-400 uppercase tracking-widest">{t('buy_seeds')}</h4>
+                        {activeEvent.id !== 'none' && (
+                          <button
+                            onClick={() => setShowEventModal(true)}
+                            className="text-[11px] font-black text-amber-600 dark:text-amber-400 flex items-center gap-1 bg-amber-50 dark:bg-amber-950/40 px-2.5 py-1 rounded-xl border border-amber-200 dark:border-amber-900"
+                          >
+                            <span>{activeEvent.icon}</span>
+                            <span>{activeEvent.name} Active</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Active Event Banner in Shop */}
+                      {activeEvent.id !== 'none' && (
+                        <div 
+                          onClick={() => setShowEventModal(true)}
+                          className="mb-4 p-3 rounded-2xl bg-gradient-to-r from-amber-500/10 via-emerald-500/10 to-teal-500/10 border border-amber-300/40 dark:border-amber-700/40 flex items-center justify-between cursor-pointer hover:opacity-90 transition-opacity"
+                        >
+                          <div className="flex items-center gap-2.5">
+                            <span className="text-2xl">{activeEvent.icon}</span>
+                            <div>
+                              <p className="text-xs font-black text-slate-800 dark:text-slate-100">
+                                {activeEvent.name} Seasonal Crops
+                              </p>
+                              <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                                {activeEvent.bonusDescription}
+                              </p>
+                            </div>
+                          </div>
+                          <span className="text-[10px] font-bold text-amber-600 dark:text-amber-400 shrink-0 ml-2">
+                            View Event →
+                          </span>
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-1 gap-3">
+                        {sortCrops(Object.keys(CROPS), activeEvent.id)
+                          .filter(key => {
+                            const crop = CROPS[key as CropType];
+                            if (!crop) return false;
+                            // Only include standard crops or crops matching the currently active seasonal event
+                            return isCropAvailableInShop(crop.event, activeEvent.id);
+                          })
+                          .map(key => {
+                            const type = key as CropType;
+                            const crop = CROPS[type];
+                            const isCropEventActive = crop.event && crop.event === activeEvent.id;
+                            const effectiveBuyPrice = getCropBuyPrice(type, activeEvent.id);
+                            const effectiveBaseSellPrice = getCropSellPrice(type, activeEvent.id);
+                            const eventMult = getEventCropMultiplier(type, activeEvent.id);
+                            const effectiveSellPrice = Math.floor(effectiveBaseSellPrice * eventMult);
+                            const isBuyDiscounted = effectiveBuyPrice < crop.buyPrice;
+
+                            return (
+                              <div 
+                                key={`shop-item-${type}`} 
+                                className={`flex items-center justify-between p-4 rounded-2xl border group relative transition-all ${
+                                  crop.rarity === 'Splatsh' ? 'bg-gradient-to-r from-cyan-50 via-sky-50 to-teal-50 border-cyan-300 shadow-sm' :
+                                  crop.type === 'Corn Candy' ? 'bg-gradient-to-r from-purple-50 via-orange-50 to-amber-50 border-orange-300 shadow-sm' :
+                                  crop.type === 'Candy Cane' ? 'bg-gradient-to-r from-red-50 via-rose-50 to-emerald-50 border-red-300 shadow-sm' :
+                                  type === 'Pumpkin' && activeEvent.id === 'halloween' ? 'bg-gradient-to-r from-orange-50 via-amber-50 to-purple-50 border-orange-300 shadow-sm' :
+                                  isCropEventActive && crop.event !== 'summer' ? 'bg-gradient-to-r from-amber-50 to-emerald-50 border-amber-300 shadow-sm' :
+                                  crop.rarity === 'Sawm' ? 'bg-gradient-to-r from-emerald-50 via-teal-50 to-amber-50 border-emerald-300 shadow-sm' :
+                                  crop.rarity === 'Secret' ? 'bg-black border-slate-800' : 
+                                  crop.rarity === 'Divine' ? 'bg-amber-400 border-amber-300' : 
+                                  crop.rarity === 'Celestial' ? 'bg-sky-50 border-sky-300' : 
+                                  'bg-slate-50 border-slate-100'
+                                }`}
+                              >
+                                <div className="flex items-center gap-4">
+                                  <RarityEffect rarity={crop.rarity} className="p-2">
+                                    <IconRenderer 
+                                      icon={crop.icon} 
+                                      className="w-full h-full text-4xl" 
+                                      containerClassName="w-16 h-16"
+                                    />
+                                  </RarityEffect>
+                                  <div>
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <p className={`font-bold text-lg ${
+                                        crop.rarity === 'Sawm' ? 'text-emerald-950' :
+                                        crop.rarity === 'Splatsh' ? 'text-cyan-900' :
+                                        crop.type === 'Corn Candy' ? 'text-orange-950' :
+                                        crop.type === 'Candy Cane' ? 'text-red-950' :
+                                        type === 'Pumpkin' && activeEvent.id === 'halloween' ? 'text-orange-950' :
+                                        crop.rarity === 'Secret' ? 'text-purple-500' : 
+                                        crop.rarity === 'Divine' ? 'text-white' : 
+                                        crop.rarity === 'Celestial' ? 'text-sky-800' : 
+                                        'text-slate-800'
+                                      }`}>
+                                        {t(crop.displayName)}
+                                      </p>
+                                      <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-md uppercase tracking-tighter ${
+                                        crop.rarity === 'Sawm' ? 'bg-emerald-600 text-white font-black shadow-xs' :
+                                        crop.rarity === 'Splatsh' ? 'bg-cyan-500 text-white font-black shadow-xs' :
+                                        crop.rarity === 'Celestial' ? 'bg-sky-200 text-sky-800' :
+                                        crop.rarity === 'Divine' ? 'bg-white/20 text-white' :
+                                        crop.rarity === 'Secret' ? 'bg-purple-900 text-purple-200' :
+                                        crop.rarity === 'Legendary' ? 'bg-amber-500 text-white' :
+                                        'bg-slate-200 text-slate-500'
+                                      }`}>
+                                        {crop.rarity}
+                                      </span>
+                                      {isCropEventActive && crop.event !== 'summer' && (
+                                        <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-md uppercase tracking-wider text-white shadow-xs ${
+                                          crop.event === 'halloween' ? 'bg-orange-600' : crop.event === 'christmas' ? 'bg-red-600' : 'bg-emerald-600'
+                                        }`}>
+                                          {crop.event === 'ramadan' ? '🌙 Ramadan Event' : crop.event === 'christmas' ? '🎄 Christmas Event' : '🎃 Halloween Event'}
+                                        </span>
+                                      )}
+                                      {type === 'Pumpkin' && activeEvent.id === 'halloween' && (
+                                        <span className="text-[9px] font-black px-1.5 py-0.5 rounded-md uppercase tracking-wider bg-orange-600 text-white shadow-xs">
+                                          🎃 Halloween Special
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p className={`text-xs ${
+                                      crop.rarity === 'Secret' ? 'text-slate-400' : 
+                                      crop.rarity === 'Divine' ? 'text-amber-100' : 
+                                      crop.rarity === 'Celestial' ? 'text-sky-600' : 
+                                      'text-slate-500'
+                                    }`}>
+                                      {t('in_stock')}: {formatNumberShort(gameState.seedInventory[type] || 0)}
+                                      {type === 'Pumpkin' && activeEvent.id === 'halloween' && (
+                                        <span className="text-orange-600 font-bold ml-2">
+                                          🎃 Buy: 50% Off (£50) | Sell: +150% Boost (£500)!
+                                        </span>
+                                      )}
+                                      {crop.type === 'Corn Candy' && isCropEventActive && (
+                                        <span className="text-purple-600 font-bold ml-2">
+                                          🍬 +25% Spooky Bonus!
+                                        </span>
+                                      )}
+                                      {crop.type === 'Candy Cane' && isCropEventActive && (
+                                        <span className="text-red-600 font-bold ml-2">
+                                          🦯 +25% Christmas Bonus!
+                                        </span>
+                                      )}
+                                      {crop.event === 'ramadan' && isCropEventActive && (
+                                        <span className="text-emerald-600 font-bold ml-2">
+                                          +20% Event Sell Bonus!
+                                        </span>
+                                      )}
+                                    </p>
+                                  </div>
+                                </div>
+                                <button 
+                                  onClick={() => buySeed(type)}
+                                  disabled={gameState.money < effectiveBuyPrice}
+                                  className="flex items-center gap-2 px-4 py-2 rounded-xl font-bold shadow-md transition-all bg-green-600 text-white disabled:opacity-50 hover:bg-green-700"
+                                >
+                                  {isBuyDiscounted && (
+                                    <span className="line-through text-white/70 text-xs mr-0.5">
+                                      £{formatNumberShort(crop.buyPrice)}
+                                    </span>
+                                  )}
+                                  <Coins size={16} /> £{formatNumberShort(effectiveBuyPrice)}
+                                </button>
+
+                              {/* Tooltip */}
+                              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 p-2.5 bg-slate-900 text-white text-[10px] rounded-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-10 shadow-xl">
+                                <div className="font-bold text-amber-400 mb-1 flex items-center justify-between">
+                                  <span>{crop.rarity}</span>
+                                  {crop.event && (
+                                    <span className="text-emerald-300 capitalize">{crop.event} Event</span>
+                                  )}
+                                  {type === 'Pumpkin' && activeEvent.id === 'halloween' && (
+                                    <span className="text-orange-400">🎃 Halloween Deal</span>
+                                  )}
+                                </div>
+                                {crop.bonus && <div className="italic opacity-80 mb-1">{crop.bonus}</div>}
+                                <div className="flex justify-between border-t border-white/10 pt-1 mt-1">
+                                  <span>Sell: £{formatNumberShort(effectiveSellPrice)}</span>
+                                  <span>Grow: {formatTimeShort(crop.growTime)}</span>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="space-y-4">
+                    <h4 className="text-sm font-black text-slate-400 uppercase tracking-widest mb-4">{t('tonics')}</h4>
+                    <p className="text-[10px] text-slate-500 font-medium italic">{t('apply_to_growing')}</p>
+                    <div className="grid grid-cols-1 gap-3">
+                      {(TONICS ? (Object.keys(TONICS) as InfusionType[]) : []).map(type => {
+                        const tonic = TONICS?.[type];
+                        const infusion = INFUSIONS?.[type];
+                        if (!tonic || !tonic.displayName || !tonic.buyPrice) return null;
+                        return (
+                          <div key={`shop-tonic-${type}`} className="flex items-center justify-between p-4 bg-purple-50 rounded-2xl border border-purple-100 group relative">
+                            <div className="flex items-center gap-4">
+                              <div className="p-2 bg-white rounded-xl shadow-sm relative">
+                                <span className="text-4xl">{tonic.icon || '🧪'}</span>
+                                <div className="absolute -bottom-1 -right-1 bg-purple-100 rounded-full p-1 border border-purple-200">
+                                  <span className="text-[10px]">{infusion?.icon || '?'}</span>
+                                </div>
+                              </div>
+                              <div>
+                                <p className="font-bold text-lg text-slate-800">{t(tonic.displayName)}</p>
+                                <div className="flex items-center gap-2">
+                                  <span className={`text-[10px] font-black uppercase tracking-widest ${infusion?.color || 'text-slate-500'}`}>
+                                    {type === 'Random' ? 'Random Infusion' : `${type} (x${infusion?.multiplier || 1})`}
+                                  </span>
+                                  <span className="text-[10px] text-slate-400 font-bold">
+                                    {t('owned')}: {gameState.tonicInventory[type] || 0}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                            <button 
+                              onClick={() => buyTonic(type)}
+                              disabled={gameState.money < tonic.buyPrice}
+                              className="flex items-center gap-2 bg-purple-600 text-white px-4 py-2 rounded-xl font-bold shadow-md disabled:opacity-50"
+                            >
+                              <Coins size={16} /> £{formatNumberShort(tonic.buyPrice)}
+                            </button>
+                          </div>
+                        );
+                      })}
+                      {(!TONICS || Object.keys(TONICS).length === 0) && (
+                        <div className="py-8 text-center text-slate-400 font-medium">
+                          No tonics available at the moment.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {/* Auto-Harvest Info Modal */}
+        {showAutoHarvestInfo && (
+          <motion.div 
+            key="auto-harvest-info-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-6"
+            onClick={() => setShowAutoHarvestInfo(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-xs rounded-3xl p-6 shadow-2xl text-center"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="w-16 h-16 bg-blue-100 text-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                <Zap size={32} className="fill-blue-600" />
+              </div>
+              <h4 className="text-xl font-black mb-2">{t('auto_harvest')}</h4>
+              <p className="text-sm text-slate-500 mb-6 font-medium">
+                {t('t_auto_harvest')}
+              </p>
+              
+              {gameState.permanentAutoHarvest ? (
+                <div className="p-4 bg-green-100 text-green-700 rounded-2xl font-bold text-sm mb-4">
+                  ✨ {t('perm_auto_active')}
+                </div>
+              ) : (
+                <button 
+                  onClick={() => {
+                    activateAutoHarvest();
+                    setShowAutoHarvestInfo(false);
+                  }}
+                  className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black shadow-lg hover:scale-105 transition-transform flex items-center justify-center gap-2"
+                >
+                  {t('watch_ad')}
+                </button>
+              )}
+              
+              <button 
+                onClick={() => setShowAutoHarvestInfo(false)}
+                className="mt-4 text-slate-400 font-bold text-sm"
+              >
+                {t('cancel')}
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {/* Premium Pack Info Modal */}
+        {showPremiumPackInfo && (
+          <motion.div 
+            key="premium-pack-info-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-6"
+            onClick={() => setShowPremiumPackInfo(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-sm rounded-[2.5rem] p-6 shadow-2xl overflow-hidden"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex justify-between items-center mb-6">
+                <h4 className="text-2xl font-black text-slate-800">{t('premium_pack')}</h4>
+                <button onClick={() => setShowPremiumPackInfo(false)} className="p-2 bg-slate-100 rounded-full"><X size={20}/></button>
+              </div>
+
+              <div className="p-5 bg-gradient-to-br from-amber-400 to-orange-600 rounded-3xl text-white shadow-xl relative overflow-hidden mb-6">
+                <div className="absolute top-0 right-0 p-4 opacity-20">
+                  <Star size={80} />
+                </div>
+                <div className="relative z-10">
+                  <h5 className="text-xl font-black mb-2">{t('premium_pack')}</h5>
+                  <ul className="text-xs space-y-2 mb-6 opacity-90 font-bold">
+                    <li className="flex items-center gap-2"><span>✨</span> {t('auto_harvest')}</li>
+                    <li className="flex items-center gap-2"><span>🐾</span> {t('animal_place')}</li>
+                    <li className="flex items-center gap-2"><span>💰</span> {t('bonus_coins')}</li>
+                    <li className="flex items-center gap-2"><span>🌱</span> {t('extra_plots')}</li>
+                    <li className="flex items-center gap-2"><span>🐄</span> {t('each_animal')}</li>
+                    <li className="flex items-center gap-2"><span>⚡</span> {t('growth_speed')}</li>
+                  </ul>
+                  
+                  {gameState.hasPremiumPack ? (
+                    <div className="w-full py-3 bg-white/20 text-white rounded-2xl font-black text-center border border-white/30">
+                      {t('already_owned')}
+                    </div>
+                  ) : (
+                    <button 
+                      onClick={() => {
+                        buyPremiumPack();
+                        setShowPremiumPackInfo(false);
+                      }}
+                      className="w-full py-3 bg-white text-orange-600 rounded-2xl font-black shadow-lg hover:scale-105 transition-transform flex items-center justify-center gap-2"
+                    >
+                      {t('buy')} ({formatCurrency(PREMIUM_PACK_PRICE)})
+                    </button>
+                  )}
+                </div>
+              </div>
+              
+              <p className="text-[10px] text-slate-400 text-center font-medium">
+                {t('support_dev_unlock')}
+              </p>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {showInventory && (
+          <motion.div 
+            key="inventory-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/40 z-50 flex items-end justify-center p-4"
+            onClick={() => setShowInventory(false)}
+          >
+            <motion.div 
+              initial={{ y: 100 }}
+              animate={{ y: 0 }}
+              exit={{ y: 100 }}
+              className="bg-white w-full max-w-md rounded-[2.5rem] p-6 shadow-2xl max-h-[80vh] flex flex-col"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex justify-between items-center mb-4 shrink-0">
+                <div className="flex items-center gap-3">
+                  <h3 className="text-2xl font-black text-slate-800">{t('inventory')}</h3>
+                  {hasSellableItems && (
+                    <button 
+                      onClick={() => setShowSellAllConfirm(true)}
+                      className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-[10px] uppercase font-black hover:bg-green-200 transition-colors shadow-sm"
+                    >
+                      {t('sell_all')}
+                    </button>
+                  )}
+                </div>
+                <button onClick={() => setShowInventory(false)} className="p-2 bg-slate-100 rounded-full"><X size={20}/></button>
+              </div>
+
+              <div className="flex bg-slate-100 p-1 rounded-2xl mb-6 shrink-0">
+                <button 
+                  onClick={() => setInventoryTab('crops')}
+                  className={`flex-1 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all ${
+                    inventoryTab === 'crops' ? 'bg-white text-green-600 shadow-sm' : 'text-slate-400'
+                  }`}
+                >
+                  {t('fruits')}
+                </button>
+                <button 
+                  onClick={() => setInventoryTab('animals')}
+                  className={`flex-1 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all ${
+                    inventoryTab === 'animals' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'
+                  }`}
+                >
+                  {t('animals')}
+                </button>
+                <button 
+                  onClick={() => setInventoryTab('tonics')}
+                  className={`flex-1 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all ${
+                    inventoryTab === 'tonics' ? 'bg-white text-purple-600 shadow-sm' : 'text-slate-400'
+                  }`}
+                >
+                  {t('tonics')}
+                </button>
+              </div>
+              
+              <div className="flex-1 overflow-y-auto pr-2 space-y-4">
+                <AnimatePresence>
+                  {sellAllFeedback && (
+                    <motion.div 
+                      key="sell-all-feedback"
+                      initial={{ opacity: 0, height: 0, marginBottom: 0 }}
+                      animate={{ opacity: 1, height: 'auto', marginBottom: 16 }}
+                      exit={{ opacity: 0, height: 0, marginBottom: 0 }}
+                      className="overflow-hidden"
+                    >
+                      <div className="p-3 bg-green-600 text-white text-center rounded-2xl font-bold text-sm shadow-lg">
+                        {sellAllFeedback}
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
+                {/* Crops Section */}
+                {inventoryTab === 'crops' && sortCrops(Object.keys(gameState.inventory), activeEvent.id).map(key => {
+                  const count = gameState.inventory[key] || 0;
+                  if (count === 0) return null;
+                  const { type, infusions, isFavorite } = parseInfusedCropKey(key);
+                  const crop = CROPS[type];
+                  if (!crop) return null;
+                  const multiplier = getInfusionMultiplier(infusions);
+                  const eventMult = getEventCropMultiplier(type, activeEvent.id);
+                  const baseSellPrice = getCropSellPrice(type, activeEvent.id);
+                  const finalSellPrice = Math.floor(baseSellPrice * multiplier * eventMult);
+                  
+                  return (
+                    <div 
+                      key={`inv-crop-${key}`} 
+                      className={`flex items-center justify-between p-4 rounded-2xl border group relative transition-all ${
+                        eventMult > 1 ? 'bg-gradient-to-r from-emerald-50 to-amber-50 border-emerald-300' :
+                        crop.rarity === 'Sawm' ? 'bg-gradient-to-r from-emerald-50 via-teal-50 to-amber-50 border-emerald-300 shadow-sm' :
+                        crop.rarity === 'Splatsh' ? 'bg-gradient-to-r from-cyan-50 to-teal-50 border-cyan-300 shadow-sm' :
+                        crop.rarity === 'Secret' ? 'bg-black border-slate-800' : 
+                        crop.rarity === 'Divine' ? 'bg-amber-400 border-amber-300' : 
+                        crop.rarity === 'Celestial' ? 'bg-sky-50 border-sky-300' : 
+                        'bg-slate-50 border-slate-100'
+                      }`}
+                    >
+                      <div className="flex items-center gap-4">
+                        <div className="relative">
+                          <RarityEffect rarity={crop.rarity} className="p-2">
+                            <IconRenderer 
+                              icon={crop.icon} 
+                              className="w-full h-full text-4xl" 
+                              containerClassName="w-16 h-16"
+                            />
+                          </RarityEffect>
+                          <button 
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleFavorite(key);
+                            }}
+                            className={`absolute -top-2 -left-2 p-1.5 rounded-full shadow-lg border transition-all ${
+                              isFavorite 
+                                ? 'bg-amber-400 border-amber-300 text-white scale-110' 
+                                : 'bg-white border-slate-200 text-slate-300 hover:text-amber-400'
+                            }`}
+                          >
+                            <Star size={14} fill={isFavorite ? "currentColor" : "none"} />
+                          </button>
+                          
+                          {/* Infusion Icons in Inventory */}
+                          {infusions.length > 0 && (
+                            <div className="absolute -bottom-1 -right-1 flex gap-0.5">
+                              {infusions.map((inf, i) => (
+                                <div key={`inv-inf-${i}`} className="bg-white rounded-full p-0.5 shadow-sm border border-slate-100" title={inf}>
+                                  <span className="text-[8px]">{INFUSIONS[inf]?.icon || '✨'}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <p className={`font-bold text-lg ${
+                              crop.rarity === 'Sawm' ? 'text-emerald-950' :
+                              crop.rarity === 'Splatsh' ? 'text-cyan-900' :
+                              crop.rarity === 'Secret' ? 'text-purple-500' : 
+                              crop.rarity === 'Divine' ? 'text-white' : 
+                              crop.rarity === 'Celestial' ? 'text-sky-800' : 
+                              'text-slate-800'
+                            }`}>
+                              {t(crop.displayName)}
+                            </p>
+                            {isFavorite && <Star size={14} className="text-amber-400 fill-current" />}
+                            {infusions.length > 0 && (
+                              <div className="flex gap-1">
+                                {infusions.map((inf, i) => (
+                                  <span key={`inv-inf-symbol-${i}`} title={inf} className="text-xs">
+                                    {INFUSIONS[inf]?.icon || '✨'}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                            {multiplier > 1 && (
+                              <span className="text-[10px] font-black bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full">
+                                x{formatNumberShort(multiplier)}
+                              </span>
+                            )}
+                            {eventMult > 1 && (
+                              <span className="text-[10px] font-black bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full">
+                                +20% Event
+                              </span>
+                            )}
+                          </div>
+                          <p className={`text-sm ${
+                            crop.rarity === 'Secret' ? 'text-slate-400' : 
+                            crop.rarity === 'Divine' ? 'text-amber-100' : 
+                            crop.rarity === 'Celestial' ? 'text-sky-600' : 
+                            'text-slate-500'
+                          }`}>
+                            {t('in_stock')}: {formatNumberShort(count)}
+                          </p>
+                        </div>
+                      </div>
+                      <button 
+                        onClick={() => !isFavorite && sellCrop(key)}
+                        disabled={isFavorite}
+                        className={`px-6 py-2 rounded-xl font-bold shadow-md flex items-center gap-2 transition-all ${
+                          isFavorite 
+                            ? 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-50' 
+                            : 'bg-green-600 text-white hover:bg-green-700'
+                        }`}
+                      >
+                        {isFavorite ? 'Favorite' : `Sell £${formatNumberShort(finalSellPrice)}`}
+                      </button>
+
+                      {/* Tooltip */}
+                      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-32 p-2 bg-slate-900 text-white text-[10px] rounded-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-10 shadow-xl">
+                        <div className="font-bold text-amber-400 mb-1">{crop.rarity}</div>
+                        {crop.bonus && <div className="italic opacity-80">{crop.bonus}</div>}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* Animal Products Section */}
+                {inventoryTab === 'animals' && (Object.keys(gameState.animalProductInventory) as AnimalProductType[]).map(type => {
+                  const count = gameState.animalProductInventory[type] || 0;
+                  if (count === 0) return null;
+                  const product = ANIMAL_PRODUCTS[type];
+                  if (!product) return null;
+                  return (
+                    <div key={`inv-prod-${type}`} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100 group relative">
+                      <div className="flex items-center gap-4">
+                        <div className="p-2 bg-white rounded-xl shadow-sm">
+                          <span className="text-4xl">{product.icon}</span>
+                        </div>
+                        <div>
+                          <p className="font-bold text-lg">{t(product.type)}</p>
+                          <p className="text-sm text-slate-500">{t('in_stock')}: {formatNumberShort(count)}</p>
+                        </div>
+                      </div>
+                      <button 
+                        onClick={() => sellAnimalProduct(type)}
+                        className="px-6 py-2 bg-blue-600 text-white rounded-xl font-bold shadow-md flex items-center gap-2"
+                      >
+                        Sell £{formatNumberShort(product.sellPrice)}
+                      </button>
+                    </div>
+                  );
+                })}
+
+                {/* Tonics Section */}
+                {inventoryTab === 'tonics' && (gameState.tonicInventory && TONICS ? (Object.keys(gameState.tonicInventory) as InfusionType[]) : []).map(type => {
+                  const count = gameState.tonicInventory[type] || 0;
+                  if (count === 0) return null;
+                  const tonic = TONICS?.[type];
+                  const infusion = INFUSIONS?.[type];
+                  if (!tonic) return null;
+                  const isSelected = gameState.selectedTonic === type && gameState.activeTool === 'Tonic';
+                  
+                  return (
+                    <div 
+                      key={`inv-tonic-${type}`} 
+                      className={`flex items-center justify-between p-4 rounded-2xl border transition-all ${
+                        isSelected ? 'bg-purple-100 border-purple-300 shadow-md' : 'bg-slate-50 border-slate-100'
+                      }`}
+                    >
+                      <div className="flex items-center gap-4">
+                        <div className="p-2 bg-white rounded-xl shadow-sm relative">
+                          <span className="text-4xl">{tonic.icon || '🧪'}</span>
+                          <div className="absolute -bottom-1 -right-1 bg-purple-100 rounded-full p-1 border border-purple-200">
+                            <span className="text-[10px]">{infusion?.icon || '?'}</span>
+                          </div>
+                        </div>
+                        <div>
+                          <p className="font-bold text-lg text-slate-800">{t(tonic.displayName)}</p>
+                          <div className="flex items-center gap-2">
+                            <span className={`text-[10px] font-black uppercase tracking-widest ${infusion?.color || 'text-slate-500'}`}>
+                              {type === 'Random' ? 'Random Infusion' : `${type} (x${infusion?.multiplier || 1})`}
+                            </span>
+                            <span className="text-[10px] text-slate-400 font-bold">{t('in_stock')}: {count}</span>
+                          </div>
+                        </div>
+                      </div>
+                      <button 
+                        onClick={() => {
+                          setGameState(prev => ({ 
+                            ...prev, 
+                            selectedTonic: type,
+                            activeTool: 'Tonic' 
+                          }));
+                          setShowInventory(false);
+                          if (pendingTonicPlotId !== null) {
+                            // Apply it to the plot
+                            handlePlotInteract(pendingTonicPlotId);
+                            setPendingTonicPlotId(null);
+                          }
+                        }}
+                        className={`px-6 py-2 rounded-xl font-bold shadow-md transition-all ${
+                          isSelected 
+                            ? 'bg-purple-600 text-white' 
+                            : 'bg-white text-purple-600 border border-purple-200 hover:bg-purple-50'
+                        }`}
+                      >
+                        {isSelected ? 'Selected' : 'Use'}
+                      </button>
+                    </div>
+                  );
+                })}
+
+                {((inventoryTab === 'crops' && Object.values(gameState.inventory).every(c => !c || (typeof c === 'number' && c <= 0))) ||
+                  (inventoryTab === 'animals' && Object.values(gameState.animalProductInventory).every(c => !c || (typeof c === 'number' && c <= 0))) ||
+                  (inventoryTab === 'tonics' && Object.values(gameState.tonicInventory).every(c => !c || (typeof c === 'number' && c <= 0)))) && (
+                  <div key="empty-inventory-msg" className="py-12 text-center text-slate-400 font-medium">
+                    {t('empty_inventory_msg')}
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {/* Sell All Confirmation Modal */}
+        {showSellAllConfirm && (
+          <motion.div 
+            key="sell-all-confirm-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 z-[70] flex items-center justify-center p-6"
+            onClick={() => setShowSellAllConfirm(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-xs rounded-3xl p-6 shadow-2xl text-center"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="w-16 h-16 bg-red-100 text-red-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                <ShoppingBasket size={32} />
+              </div>
+              <h4 className="text-xl font-black mb-2">{t('sell_everything')}</h4>
+              <p className="text-sm text-slate-500 mb-6 font-medium">
+                {t('sell_everything_desc')}
+              </p>
+              
+              <div className="space-y-3">
+                <button 
+                  onClick={sellAll}
+                  className="w-full py-4 bg-green-600 text-white rounded-2xl font-black shadow-lg hover:scale-105 transition-transform"
+                >
+                  {t('yes_sell_all')}
+                </button>
+                <button 
+                  onClick={() => setShowSellAllConfirm(false)}
+                  className="w-full py-4 bg-slate-100 text-slate-400 rounded-2xl font-black hover:bg-slate-200 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {showAnimalScreen && (
+          <motion.div 
+            key="animal-screen-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4"
+            onClick={() => setShowAnimalScreen(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-purple-50 w-full max-w-md rounded-[2.5rem] p-6 shadow-2xl h-[80vh] flex flex-col"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex justify-between items-center mb-6 shrink-0">
+                <div className="flex items-center gap-2">
+                  <PawPrint className="text-purple-600" size={24} />
+                  <h3 className="text-2xl font-black text-slate-800">{t('animal_place_title')}</h3>
+                </div>
+                <button onClick={() => setShowAnimalScreen(false)} className="p-2 bg-white rounded-full shadow-sm"><X size={20}/></button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto pr-2 space-y-6">
+                {/* Animal Shop Button */}
+                <button 
+                  onClick={() => setShowAnimalShop(true)}
+                  className="w-full p-4 bg-purple-600 text-white rounded-2xl font-black flex items-center justify-center gap-2 shadow-lg hover:bg-purple-700 transition-colors"
+                >
+                  <ShoppingBasket size={20} />
+                  <span>{t('animal_shop')}</span>
+                </button>
+
+                {/* Cages Grid */}
+                <div className="grid grid-cols-2 gap-4">
+                  {gameState.cages.slice(0, gameState.unlockedCages).map((cage) => (
+                    <div
+                      key={`cage-display-${cage.id}`}
+                      className="aspect-square bg-white rounded-3xl border-4 border-purple-100 flex flex-col items-center justify-center relative shadow-sm hover:border-purple-300 transition-all group overflow-hidden"
+                    >
+                      {/* Cage count badge */}
+                      <div className="absolute top-2.5 right-2.5 bg-purple-100 text-purple-600 text-[10px] font-black px-2 py-0.5 rounded-full z-10">
+                        {cage.count}/2
+                      </div>
+
+                      {/* Quick remove button to change places */}
+                      {cage.type && cage.count > 0 && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeAnimalFromCage(cage.id);
+                          }}
+                          className="absolute top-2.5 left-2.5 z-20 bg-red-50 hover:bg-red-100 border border-red-200 text-red-600 px-2 py-1 rounded-xl text-[10px] font-black flex items-center gap-1 shadow-xs transition-all active:scale-90 cursor-pointer"
+                          title={t('remove_animal_desc')}
+                        >
+                          <RotateCcw size={10} />
+                          <span>{t('remove')}</span>
+                        </button>
+                      )}
+                      
+                      <button
+                        type="button"
+                        onClick={() => setShowAnimalSelector(cage.id)}
+                        className="w-full h-full flex flex-col items-center justify-center cursor-pointer p-4"
+                      >
+                        {cage.type ? (
+                          <div className="flex flex-col items-center">
+                            <div className="flex gap-1">
+                              {[...Array(cage.count)].map((_, i) => (
+                                <span key={`cage-animal-${cage.id}-${i}`} className="text-4xl">{ANIMALS[cage.type!].icon}</span>
+                              ))}
+                            </div>
+                            <span className="text-xs font-bold text-slate-400 mt-2 uppercase tracking-widest">{t(cage.type)}</span>
+                            <span className="text-[10px] font-bold text-purple-500 mt-0.5">{t('change_places')}</span>
+                          </div>
+                        ) : (
+                          <div className="flex flex-col items-center text-slate-300">
+                            <Home size={32} />
+                            <span className="text-[10px] font-bold mt-1 uppercase tracking-widest">{t('empty_cage')}</span>
+                          </div>
+                        )}
+
+                        {cage.count < 2 && (
+                          <div key={`add-animal-overlay-${cage.id}`} className="absolute inset-0 bg-purple-600/0 group-hover:bg-purple-600/5 flex items-center justify-center transition-all pointer-events-none">
+                            <div className="opacity-0 group-hover:opacity-100 bg-white p-1.5 rounded-full shadow-md">
+                              <Plus size={16} className="text-purple-600" />
+                            </div>
+                          </div>
+                        )}
+                      </button>
+                    </div>
+                  ))}
+
+                  {gameState.unlockedCages < MAX_CAGES && (
+                    <button
+                      key="buy-cage-button"
+                      onClick={buyCage}
+                      disabled={gameState.money < CAGE_COST}
+                      className="aspect-square bg-slate-100 rounded-3xl border-4 border-dashed border-slate-300 flex flex-col items-center justify-center text-slate-400 hover:border-slate-400 transition-all disabled:opacity-50"
+                    >
+                      <Plus size={32} />
+                      <span className="text-[10px] font-black mt-1 uppercase tracking-widest">{t('new_cage')}</span>
+                      <span className="text-xs font-bold mt-1">£{formatNumberShort(CAGE_COST)}</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {showAnimalShop && (
+          <motion.div 
+            key="animal-shop-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-6"
+            onClick={() => setShowAnimalShop(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-white w-full max-w-xs rounded-[2rem] p-6 shadow-2xl"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex justify-between items-center mb-6 shrink-0">
+                <h3 className="text-xl font-black text-slate-800">{t('animal_shop')}</h3>
+                <button onClick={() => setShowAnimalShop(false)} className="p-2 bg-slate-100 rounded-full"><X size={16}/></button>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3">
+                {(Object.keys(ANIMALS) as AnimalType[])
+                  .filter(type => !ANIMALS[type].eventOnly)
+                  .map(type => {
+                    const animal = ANIMALS[type];
+                  return (
+                    <div key={`shop-animal-${type}`} className="flex items-center justify-between p-4 bg-purple-50 rounded-2xl border border-purple-100">
+                      <div className="flex items-center gap-3">
+                        <span className="text-3xl">{animal.icon}</span>
+                        <div>
+                          <p className="font-bold text-slate-800">{t(type)}</p>
+                          <p className="text-[10px] text-slate-500">{t('owned')}: {formatNumberShort(gameState.animalInventory[type] || 0)}</p>
+                        </div>
+                      </div>
+                      <button 
+                        onClick={() => buyAnimal(type)}
+                        disabled={gameState.money < animal.buyPrice}
+                        className="flex items-center gap-1 bg-purple-600 text-white px-3 py-1.5 rounded-xl font-bold shadow-md disabled:opacity-50 text-xs"
+                      >
+                        <Coins size={12} /> £{formatNumberShort(animal.buyPrice)}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {showAnimalSelector !== null && (
+          <motion.div 
+            key="animal-selector-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-6"
+            onClick={() => setShowAnimalSelector(null)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-white w-full max-w-xs rounded-[2rem] p-6 shadow-2xl"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xl font-black text-slate-800">{t('place_animal')}</h3>
+                <button 
+                  onClick={() => setShowAnimalSelector(null)}
+                  className="p-1.5 bg-slate-100 text-slate-500 rounded-full hover:bg-slate-200 transition-colors cursor-pointer"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              {/* Current animal in pen with Remove / Empty Pen buttons */}
+              {(() => {
+                const currentCage = gameState.cages[showAnimalSelector!];
+                if (!currentCage || !currentCage.type || currentCage.count <= 0) return null;
+                const animalInfo = ANIMALS[currentCage.type];
+                return (
+                  <div className="mb-4 p-3 bg-purple-50 border border-purple-200 rounded-2xl">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 overflow-hidden">
+                        <span className="text-2xl shrink-0">{animalInfo.icon}</span>
+                        <div className="overflow-hidden text-left">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-black text-slate-800 truncate">{t(currentCage.type)}</span>
+                            <span className="text-[10px] font-bold text-purple-700 bg-purple-200/80 px-1.5 py-0.2 rounded-full">
+                              {currentCage.count}/2
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-slate-500 font-medium truncate">{t('current_in_pen')}</p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => removeAnimalFromCage(showAnimalSelector!)}
+                          className="px-2.5 py-1.5 bg-red-500 hover:bg-red-600 active:scale-95 text-white rounded-xl text-xs font-black flex items-center gap-1 shadow-sm transition-all cursor-pointer"
+                          title={t('remove_animal_desc')}
+                        >
+                          <RotateCcw size={11} />
+                          <span>{t('remove')}</span>
+                        </button>
+                        {currentCage.count > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => removeAnimalFromCage(showAnimalSelector!, true)}
+                            className="px-2 py-1.5 bg-red-100 hover:bg-red-200 active:scale-95 text-red-700 rounded-xl text-[10px] font-bold transition-all cursor-pointer"
+                            title={t('empty_pen')}
+                          >
+                            {t('empty_pen')}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {currentCage.count >= 2 && (
+                      <p className="mt-2 text-[10px] text-amber-800 bg-amber-100/70 border border-amber-200 rounded-lg p-1.5 text-center font-medium">
+                        {t('pen_full_hint')}
+                      </p>
+                    )}
+                  </div>
+                );
+              })()}
+
+              <div className="grid grid-cols-1 gap-3 max-h-[45vh] overflow-y-auto pr-2">
+                {(Object.keys(ANIMALS) as AnimalType[]).map(type => {
+                  const count = gameState.animalInventory[type] || 0;
+                  const animal = ANIMALS[type];
+                  const cage = gameState.cages[showAnimalSelector!];
+                  const canPlace = count > 0 && cage.count < 2 && (!cage.type || cage.type === type);
+
+                  if (count === 0) return null;
+
+                  return (
+                    <button
+                      key={`animal-option-${type}`}
+                      onClick={() => placeAnimal(showAnimalSelector!, type)}
+                      disabled={!canPlace}
+                      className={`flex items-center justify-between p-3 rounded-2xl border-2 transition-all ${
+                        canPlace 
+                          ? 'border-purple-100 bg-purple-50 hover:border-purple-300 cursor-pointer' 
+                          : 'border-slate-100 bg-slate-50 opacity-50 grayscale cursor-not-allowed'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <span className="text-3xl">{animal.icon}</span>
+                        <div className="text-left">
+                          <p className="font-bold text-slate-800">{t(type)}</p>
+                          <p className="text-xs text-slate-500">{formatNumberShort(count)} {t('owned')}</p>
+                        </div>
+                      </div>
+                      {canPlace && <Check className="text-purple-600" size={20} />}
+                    </button>
+                  );
+                })}
+                {Object.values(gameState.animalInventory).every(c => !c || (typeof c === 'number' && c <= 0)) && (
+                  <div key="empty-animal-inventory-msg" className="py-6 text-center text-slate-400 font-medium text-xs">
+                    {t('animal_inventory_empty')}
+                  </div>
+                )}
+              </div>
+              <button 
+                onClick={() => setShowAnimalSelector(null)}
+                className="w-full mt-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl font-bold text-xs transition-colors cursor-pointer"
+              >
+                {t('cancel')}
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {/* Roy Menu Modal */}
+        {showRoyMenu && (
+          <motion.div 
+            key="roy-menu-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 z-[70] flex items-center justify-center p-6"
+            onClick={() => setShowRoyMenu(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-xs rounded-3xl p-6 shadow-2xl text-center"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="w-20 h-20 bg-amber-100 text-amber-600 rounded-full flex items-center justify-center mx-auto mb-4 border-4 border-amber-50">
+                <User size={40} />
+              </div>
+              <h4 className="text-2xl font-black mb-1">{t('roy_trader')}</h4>
+              <p className="text-xs text-slate-400 mb-6 font-bold uppercase tracking-widest">"{t('need_lucky_spin')}"</p>
+              
+              <div className="space-y-3">
+                <button 
+                  onClick={handleSpin}
+                  disabled={gameState.money < 250}
+                  className="w-full py-4 bg-amber-500 text-white rounded-2xl font-black shadow-lg shadow-amber-200 flex items-center justify-center gap-3 hover:bg-amber-600 transition-all disabled:opacity-50 disabled:shadow-none"
+                >
+                  <Coins size={20} />
+                  <span>{t('spin')} (£250)</span>
+                </button>
+                
+                <button 
+                  onClick={() => {
+                    setShowRoyMenu(false);
+                    setShowRoyHelp(true);
+                  }}
+                  className="w-full py-4 bg-slate-100 text-slate-600 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-slate-200 transition-all"
+                >
+                  <HelpCircle size={20} />
+                  <span>{t('how_to_play')}</span>
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {/* Roy Help Modal */}
+        {showRoyHelp && (
+          <motion.div 
+            key="roy-help-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 z-[70] flex items-center justify-center p-6"
+            onClick={() => {
+              setShowRoyHelp(false);
+              setHelpTab('main');
+            }}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-sm rounded-[2.5rem] p-8 shadow-2xl flex flex-col max-h-[80vh]"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex justify-between items-center mb-6 shrink-0">
+                <h4 className="text-2xl font-black text-slate-800">
+                  {helpTab === 'main' ? t('how_to_play') : helpTab === 'fruits' ? t('fruit_values') : helpTab === 'infusions' ? t('infusions') : 'Current Event'}
+                </h4>
+                <button onClick={() => {
+                  setShowRoyHelp(false);
+                  setHelpTab('main');
+                }} className="p-2 bg-slate-100 rounded-full text-slate-400">
+                  <X size={20} />
+                </button>
+              </div>
+
+              {/* Tab Switcher */}
+              <div className="grid grid-cols-4 gap-1.5 mb-6 shrink-0">
+                <button 
+                  onClick={() => setHelpTab('main')}
+                  className={`py-2 px-1 rounded-xl text-[9px] font-black uppercase tracking-wider text-center transition-all ${
+                    helpTab === 'main' ? 'bg-green-600 text-white shadow-md' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'
+                  }`}
+                >
+                  {t('main')}
+                </button>
+                <button 
+                  onClick={() => setHelpTab('fruits')}
+                  className={`py-2 px-1 rounded-xl text-[9px] font-black uppercase tracking-wider text-center transition-all ${
+                    helpTab === 'fruits' ? 'bg-green-600 text-white shadow-md' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'
+                  }`}
+                >
+                  {t('fruits')}
+                </button>
+                <button 
+                  onClick={() => setHelpTab('infusions')}
+                  className={`py-2 px-1 rounded-xl text-[9px] font-black uppercase tracking-wider text-center transition-all ${
+                    helpTab === 'infusions' ? 'bg-green-600 text-white shadow-md' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'
+                  }`}
+                >
+                  {t('infusions')}
+                </button>
+                <button 
+                  onClick={() => setHelpTab('event')}
+                  className={`py-2 px-1 rounded-xl text-[9px] font-black uppercase tracking-wider text-center transition-all ${
+                    helpTab === 'event' ? 'bg-green-600 text-white shadow-md' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'
+                  }`}
+                >
+                  current evnt
+                </button>
+              </div>
+              
+              <div className="flex-1 overflow-y-auto pr-2 space-y-6">
+                {helpTab === 'main' && (
+                  <>
+                    <div className="flex gap-4">
+                      <div className="w-12 h-12 bg-green-100 text-green-600 rounded-2xl flex items-center justify-center shrink-0">
+                        <Hand size={24} />
+                      </div>
+                      <div>
+                        <h5 className="font-black text-slate-800 uppercase text-xs tracking-widest mb-1">{t('planting')}</h5>
+                        <p className="text-sm text-slate-500 leading-relaxed">{t('planting_desc')}</p>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-4">
+                      <div className="w-12 h-12 bg-amber-100 text-amber-600 rounded-2xl flex items-center justify-center shrink-0">
+                        <Sprout size={24} />
+                      </div>
+                      <div>
+                        <h5 className="font-black text-slate-800 uppercase text-xs tracking-widest mb-1">{t('harvesting')}</h5>
+                        <p className="text-sm text-slate-500 leading-relaxed">{t('harvesting_desc')}</p>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-4">
+                      <div className="w-12 h-12 bg-red-100 text-red-600 rounded-2xl flex items-center justify-center shrink-0">
+                        <Trash2 size={24} />
+                      </div>
+                      <div>
+                        <h5 className="font-black text-slate-800 uppercase text-xs tracking-widest mb-1">{t('shovel')}</h5>
+                        <p className="text-sm text-slate-500 leading-relaxed">{t('shovel_desc')}</p>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-4">
+                      <div className="w-12 h-12 bg-blue-100 text-blue-600 rounded-2xl flex items-center justify-center shrink-0">
+                        <ShoppingBasket size={24} />
+                      </div>
+                      <div>
+                        <h5 className="font-black text-slate-800 uppercase text-xs tracking-widest mb-1">{t('shop')}</h5>
+                        <p className="text-sm text-slate-500 leading-relaxed">{t('shop_desc')}</p>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-4">
+                      <div className="w-12 h-12 bg-purple-100 text-purple-600 rounded-2xl flex items-center justify-center shrink-0">
+                        <FlaskConical size={24} />
+                      </div>
+                      <div>
+                        <h5 className="font-black text-slate-800 uppercase text-xs tracking-widest mb-1">{t('Tonic')}</h5>
+                        <p className="text-sm text-slate-500 leading-relaxed">{t('tonic_desc')}</p>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-4">
+                      <div className="w-12 h-12 bg-amber-100 text-amber-600 rounded-2xl flex items-center justify-center shrink-0">
+                        <Star size={24} />
+                      </div>
+                      <div>
+                        <h5 className="font-black text-slate-800 uppercase text-xs tracking-widest mb-1">{t('obtaining_tonics')}</h5>
+                        <p className="text-sm text-slate-500 leading-relaxed">{t('obtaining_tonics_desc')}</p>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-4">
+                      <div className="w-12 h-12 bg-purple-100 text-purple-600 rounded-2xl flex items-center justify-center shrink-0">
+                        <PawPrint size={24} />
+                      </div>
+                      <div>
+                        <h5 className="font-black text-slate-800 uppercase text-xs tracking-widest mb-1">{t('animals')}</h5>
+                        <p className="text-sm text-slate-500 leading-relaxed">{t('animal_desc')}</p>
+                      </div>
+                    </div>
+
+                    <div className="pt-4 border-t border-slate-100">
+                      <h5 className="font-black text-slate-800 uppercase text-xs tracking-widest mb-4">{t('connect')}</h5>
+                      <div className="grid grid-cols-2 gap-3">
+                        <a 
+                          href="https://discord.gg/dRFcH6eSAy" 
+                          target="_blank" 
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-3 p-3 bg-indigo-50 rounded-2xl border border-indigo-100 hover:bg-indigo-100 transition-colors group"
+                        >
+                          <div className="w-8 h-8 bg-indigo-500 text-white rounded-xl flex items-center justify-center shadow-sm">
+                            <MessageCircle size={18} />
+                          </div>
+                          <div>
+                            <p className="text-[10px] font-black text-indigo-600 uppercase tracking-wider">Discord</p>
+                            <p className="text-[8px] text-indigo-400 font-bold">{t('join_server')}</p>
+                          </div>
+                        </a>
+                        <a 
+                          href="https://www.instagram.com/simox.__.m.h/" 
+                          target="_blank" 
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-3 p-3 bg-pink-50 rounded-2xl border border-pink-100 hover:bg-pink-100 transition-colors group"
+                        >
+                          <div className="w-8 h-8 bg-pink-500 text-white rounded-xl flex items-center justify-center shadow-sm">
+                            <Instagram size={18} />
+                          </div>
+                          <div>
+                            <p className="text-[10px] font-black text-pink-600 uppercase tracking-wider">Instagram</p>
+                            <p className="text-[8px] text-pink-400 font-bold">{t('follow_us')}</p>
+                          </div>
+                        </a>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {helpTab === 'fruits' && (
+                  <div className="space-y-3">
+                    {sortCrops(Object.keys(CROPS), activeEvent.id)
+                      .filter(key => {
+                        const crop = CROPS[key as CropType];
+                        if (!crop) return false;
+                        return !crop.event || crop.event === activeEvent.id;
+                      })
+                      .map(key => {
+                      const type = key as CropType;
+                      const crop = CROPS[type];
+                      return (
+                        <div key={`help-fruit-${type}`} className="flex items-center justify-between p-3 bg-slate-50 rounded-2xl border border-slate-100">
+                          <div className="flex items-center gap-3">
+                            <IconRenderer 
+                              icon={crop.icon} 
+                              className="w-full h-full text-2xl" 
+                              containerClassName="w-10 h-10"
+                            />
+                            <div>
+                              <p className="font-bold text-slate-800 text-sm">{t(crop.displayName)}</p>
+                              <p className={`text-[10px] font-bold uppercase tracking-widest ${
+                                crop.rarity === 'Sawm' ? 'text-emerald-600 font-black' :
+                                crop.rarity === 'Splatsh' ? 'text-cyan-500 font-black' :
+                                crop.rarity === 'Celestial' ? 'text-sky-500' :
+                                crop.rarity === 'Divine' ? 'text-amber-500' :
+                                crop.rarity === 'Secret' ? 'text-purple-600' :
+                                crop.rarity === 'Myth' ? 'text-purple-400' :
+                                crop.rarity === 'Legendary' ? 'text-yellow-500' :
+                                'text-slate-400'
+                              }`}>
+                                {crop.rarity}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <div className="flex items-center gap-2 justify-end">
+                              {(() => {
+                                const curBuy = getCropBuyPrice(crop.type, activeEvent.id);
+                                const curSell = Math.floor(getCropSellPrice(crop.type, activeEvent.id) * getEventCropMultiplier(crop.type, activeEvent.id));
+                                return (
+                                  <>
+                                    <span className="text-[10px] font-bold text-slate-400">
+                                      {t('buy')}: {curBuy < crop.buyPrice ? (
+                                        <span className="text-emerald-600 font-black">£{formatNumberShort(curBuy)}</span>
+                                      ) : (
+                                        `£${formatNumberShort(curBuy)}`
+                                      )}
+                                    </span>
+                                    <span className="text-[10px] font-bold text-green-600">
+                                      {t('sell')}: {curSell > crop.sellPrice ? (
+                                        <span className="text-amber-600 font-black">£{formatNumberShort(curSell)}</span>
+                                      ) : (
+                                        `£${formatNumberShort(curSell)}`
+                                      )}
+                                    </span>
+                                  </>
+                                );
+                              })()}
+                            </div>
+                            <p className="text-[10px] font-bold text-blue-500">{t('grow_time')}: {formatTimeShort(crop.growTime)}</p>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {helpTab === 'infusions' && (
+                  <div className="space-y-3">
+                    <div className="p-3 bg-amber-50 rounded-2xl border border-amber-100 mb-4">
+                      <p className="text-[10px] font-bold text-amber-700 leading-relaxed">
+                        ✨ {t('apply_to_growing')}
+                      </p>
+                    </div>
+                    {(INFUSIONS ? Object.entries(INFUSIONS) : []).map(([name, data]) => (
+                      <div key={`help-infusion-${name}`} className="flex items-center justify-between p-3 bg-slate-50 rounded-2xl border border-slate-100">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center shadow-sm border border-slate-100">
+                            <span className="text-xl">{data?.icon || '✨'}</span>
+                          </div>
+                          <div>
+                            <p className={`font-bold text-sm ${data?.color || 'text-slate-500'}`}>{t(`${name} Tonic` as any)}</p>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{t('boost')}</p>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-lg font-black text-slate-800">×{formatNumberShort(data?.multiplier || 1)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {helpTab === 'event' && (
+                  <CurrentEventHelpSection
+                    activeEvent={activeEvent}
+                    t={t}
+                  />
+                )}
+              </div>
+              
+              <button 
+                onClick={() => {
+                  setShowRoyHelp(false);
+                  setHelpTab('main');
+                }}
+                className="w-full mt-8 py-4 bg-green-600 text-white rounded-2xl font-black shadow-lg shadow-green-100 hover:bg-green-700 transition-all shrink-0"
+              >
+                {t('got_it')}
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {/* Spin Result Modal */}
+        {spinResult && (
+          <motion.div 
+            key="spin-result-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/80 z-[80] flex items-center justify-center p-6"
+            onClick={() => setSpinResult(null)}
+          >
+            <motion.div 
+              initial={{ scale: 0.5, rotate: -10 }}
+              animate={{ scale: 1, rotate: 0 }}
+              exit={{ scale: 0.5, rotate: 10 }}
+              className="bg-white w-full max-w-xs rounded-[3rem] p-8 shadow-2xl text-center relative overflow-hidden"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className={`absolute top-0 left-0 right-0 h-2 bg-gradient-to-r ${
+                CROPS[spinResult].rarity === 'Celestial' ? 'from-sky-400 via-white to-sky-400' :
+                CROPS[spinResult].rarity === 'Divine' ? 'from-amber-400 via-yellow-300 to-amber-400' :
+                CROPS[spinResult].rarity === 'Secret' ? 'from-purple-600 via-slate-800 to-purple-600' :
+                'from-green-400 via-emerald-300 to-green-400'
+              }`} />
+              <h4 className="text-3xl font-black mb-6 text-slate-800">{t('you_won')}</h4>
+              
+              <div className="mb-6 relative">
+                <div className={`absolute inset-0 blur-3xl rounded-full opacity-50 animate-pulse ${
+                  CROPS[spinResult].rarity === 'Celestial' ? 'bg-sky-200' :
+                  CROPS[spinResult].rarity === 'Divine' ? 'bg-amber-100' :
+                  'bg-white'
+                }`} />
+                <RarityEffect rarity={CROPS[spinResult].rarity} className="w-32 h-32 mx-auto flex items-center justify-center bg-slate-50 rounded-[2rem] border-4 border-white shadow-xl relative z-10">
+                  <IconRenderer 
+                    icon={CROPS[spinResult].icon} 
+                    className="w-full h-full text-7xl" 
+                    containerClassName="w-24 h-24"
+                  />
+                </RarityEffect>
+              </div>
+              
+              <div className="mb-8">
+                <p className="text-2xl font-black text-slate-800 mb-1">{t(CROPS[spinResult].displayName)} {t('seed')}</p>
+                <div className="inline-block px-4 py-1 bg-slate-100 rounded-full">
+                  <span className={`text-xs font-black uppercase tracking-widest ${
+                    CROPS[spinResult].rarity === 'Celestial' ? 'text-sky-600' :
+                    CROPS[spinResult].rarity === 'Divine' ? 'text-amber-600' :
+                    CROPS[spinResult].rarity === 'Secret' ? 'text-purple-600' :
+                    CROPS[spinResult].rarity === 'Legendary' ? 'text-yellow-600' :
+                    'text-slate-400'
+                  }`}>{CROPS[spinResult].rarity}</span>
+                </div>
+              </div>
+              
+              <button 
+                onClick={() => setSpinResult(null)}
+                className="w-full py-4 bg-slate-900 text-white rounded-2xl font-black shadow-xl hover:bg-slate-800 transition-all"
+              >
+                {t('awesome')}
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {/* Settings Modal */}
+        {/* Full Money Modal */}
+        {showFullMoney && (
+          <motion.div 
+            key="full-money-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 z-[120] flex items-center justify-center p-6"
+            onClick={() => setShowFullMoney(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-xs rounded-[2.5rem] p-8 shadow-2xl text-center"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="w-16 h-16 bg-amber-100 text-amber-600 rounded-full flex items-center justify-center mx-auto mb-4 shadow-sm">
+                <Wallet size={32} />
+              </div>
+              <h4 className="text-xl font-black text-slate-800 mb-2">Total Balance</h4>
+              <p className="text-3xl font-black text-amber-600 mb-6 scale-75 origin-center break-all">
+                £{Math.floor(gameState.money).toLocaleString('en-GB', { useGrouping: true, maximumFractionDigits: 0 }).replace(/e\+?(\d+)/g, (_, p) => "0".repeat(Number(p)))}
+              </p>
+              <button 
+                onClick={() => setShowFullMoney(false)}
+                className="w-full py-4 bg-slate-900 text-white rounded-2xl font-black hover:bg-slate-800 transition-all"
+              >
+                Close
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {showSettings && (
+          <motion.div 
+            key="settings-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 z-[90] flex items-center justify-center p-6"
+            onClick={() => setShowSettings(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-sm rounded-[2.5rem] p-6 shadow-2xl flex flex-col max-h-[80vh]"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex justify-between items-center mb-6 shrink-0" dir={gameState.language === 'ar' || gameState.language === 'ur' ? 'rtl' : 'ltr'}>
+                <h4 className="text-2xl font-black text-slate-800 flex items-center gap-2">
+                  <Settings size={28} className="text-slate-400" />
+                  {t('settings')}
+                </h4>
+                <button onClick={() => setShowSettings(false)} className="p-2 bg-slate-100 rounded-full">
+                  <X size={20}/>
+                </button>
+              </div>
+
+              <div className="overflow-y-auto pr-2 space-y-8 custom-scrollbar">
+                {/* Language Selection */}
+                <div>
+                  <h5 className="font-black text-slate-400 uppercase text-[10px] tracking-widest mb-4 flex items-center gap-2">
+                    <Languages size={14} />
+                    {t('select_language')}
+                  </h5>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(Object.keys(LANGUAGES) as LanguageCode[]).map(code => (
+                      <button
+                        key={`lang-${code}`}
+                        onClick={() => {
+                          setGameState(prev => {
+                            const updated = { ...prev, language: code, lastSaved: Date.now() };
+                            try {
+                              localStorage.setItem('pocket_farm_save_v3', JSON.stringify(updated));
+                            } catch (err) {
+                              console.error(err);
+                            }
+                            return updated;
+                          });
+                        }}
+                        className={`py-3 px-4 rounded-2xl text-xs font-bold border-2 transition-all ${
+                          gameState.language === code 
+                            ? 'bg-green-600 border-green-600 text-white shadow-md' 
+                            : 'bg-slate-50 border-slate-100 text-slate-600 hover:border-slate-200'
+                        }`}
+                      >
+                        {LANGUAGES[code]}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Theme / Appearance Section */}
+                <div className="pt-6 border-t border-slate-100 dark-mode-border">
+                  <h5 className="font-black text-slate-400 uppercase text-[10px] tracking-widest mb-4 flex items-center gap-2">
+                    <Sun size={14} className="dark-mode-icon" />
+                    {t('dark_mode')}
+                  </h5>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => setGameState(prev => ({ ...prev, darkMode: false }))}
+                      className={`py-3 px-4 rounded-2xl text-xs font-bold border-2 transition-all flex items-center justify-center gap-2 ${
+                        !gameState.darkMode 
+                          ? 'bg-green-600 border-green-600 text-white shadow-md' 
+                          : 'bg-slate-50 border-slate-100 text-slate-600 hover:border-slate-200'
+                      }`}
+                    >
+                      <Sun size={14} />
+                      {t('light')}
+                    </button>
+                    <button
+                      onClick={() => setGameState(prev => ({ ...prev, darkMode: true }))}
+                      className={`py-3 px-4 rounded-2xl text-xs font-bold border-2 transition-all flex items-center justify-center gap-2 ${
+                        gameState.darkMode 
+                          ? 'bg-slate-700 border-slate-700 text-white shadow-md' 
+                          : 'bg-slate-50 border-slate-100 text-slate-600 hover:border-slate-200'
+                      }`}
+                    >
+                      <Moon size={14} />
+                      {t('dark')}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Music Section */}
+                <div className="pt-6 border-t border-slate-100">
+                  <h5 className="font-black text-slate-400 uppercase text-[10px] tracking-widest mb-4 flex items-center gap-2">
+                    <Music size={14} />
+                    {t('music')}
+                  </h5>
+                  
+                  <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 space-y-4">
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="flex-1 overflow-hidden">
+                        <p className="text-xs font-bold text-slate-800 truncate">
+                          {gameState.customMusicName || t('no_music_selected')}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {gameState.customMusicData && (
+                          <>
+                            <button 
+                              onClick={() => setGameState(prev => ({ ...prev, isMusicPlaying: !prev.isMusicPlaying }))}
+                              className={`p-2 rounded-full shadow-sm transition-all ${
+                                gameState.isMusicPlaying ? 'bg-amber-100 text-amber-600' : 'bg-green-100 text-green-600'
+                              }`}
+                              title={gameState.isMusicPlaying ? t('pause') : t('play')}
+                            >
+                              {gameState.isMusicPlaying ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}
+                            </button>
+                            <button 
+                              onClick={() => setGameState(prev => ({ ...prev, isMusicPlaying: false, musicKey: (prev.musicKey || 0) + 1 }))}
+                              className="p-2 bg-slate-100 text-slate-600 rounded-full shadow-sm hover:bg-slate-200 transition-colors"
+                              title={t('stop')}
+                            >
+                              <Square size={16} fill="currentColor" />
+                            </button>
+                            <button 
+                              onClick={removeCustomMusic}
+                              className="p-2 bg-red-100 text-red-600 rounded-full shadow-sm hover:bg-red-200 transition-colors"
+                              title={t('remove_music')}
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </>
+                        )}
+                        {!gameState.customMusicData && (
+                          <label className="p-2 bg-blue-600 text-white rounded-full shadow-lg cursor-pointer hover:bg-blue-700 transition-colors">
+                            <Upload size={16} />
+                            <input 
+                              type="file" 
+                              accept="audio/mp3,audio/wav,audio/ogg" 
+                              className="hidden" 
+                              onChange={handleMusicUpload} 
+                            />
+                          </label>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                        <span>{t('volume')}</span>
+                        <span>{Math.round((gameState.musicVolume || 0) * 100)}%</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <Volume2 size={16} className="text-slate-400" />
+                        <input 
+                          type="range" 
+                          min="0" 
+                          max="1" 
+                          step="0.01" 
+                          value={gameState.musicVolume || 0.5}
+                          onChange={(e) => setGameState(prev => ({ ...prev, musicVolume: parseFloat(e.target.value) }))}
+                          className="flex-1 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Save Game Section */}
+                <div className="pt-6 border-t border-slate-100">
+                  <div className="flex items-center justify-between mb-2">
+                    <h5 className="font-black text-slate-400 uppercase text-[10px] tracking-widest flex items-center gap-2">
+                      <Save size={14} className="text-emerald-600" />
+                      {t('save_game') || 'Save Game Progress'}
+                    </h5>
+                    <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-100">
+                      saves/save.txt
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 mb-3 leading-relaxed">
+                    Save your game progress into a single text file that will be saved in a file named <span className="font-bold text-slate-700">saves</span> in the game files (<code className="bg-slate-100 px-1 py-0.5 rounded text-[11px] font-mono text-emerald-700">saves/save.txt</code>) and download a backup text file.
+                  </p>
+                  
+                  <button 
+                    onClick={handleSaveGameToFile}
+                    disabled={isSaving}
+                    className="w-full py-4 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white rounded-2xl font-black text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-100 transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    <Download size={18} />
+                    {isSaving ? 'Saving progress...' : 'Save Game (Save to File)'}
+                  </button>
+
+                  {saveMessage && (
+                    <motion.div 
+                      initial={{ opacity: 0, y: -4 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="mt-3 p-3 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-xl text-xs font-bold flex items-center gap-2"
+                    >
+                      <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
+                      <span>{saveMessage}</span>
+                    </motion.div>
+                  )}
+
+                  {serverSaveInfo?.exists && serverSaveInfo.lastModified && (
+                    <p className="text-[10px] text-slate-400 mt-2 text-center">
+                      Game file status: saves/save.txt ({serverSaveInfo.size} bytes, {new Date(serverSaveInfo.lastModified).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})
+                    </p>
+                  )}
+                </div>
+
+                {/* Load Section */}
+                <div className="pt-6 border-t border-slate-100">
+                  <div className="flex items-center justify-between mb-2">
+                    <h5 className="font-black text-slate-400 uppercase text-[10px] tracking-widest flex items-center gap-2">
+                      <FileUp size={14} className="text-blue-600" />
+                      {t('load') || 'Load'}
+                    </h5>
+                    <span className="text-[10px] font-bold text-blue-700 bg-blue-50 px-2.5 py-0.5 rounded-full border border-blue-100">
+                      Text File (.txt)
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 mb-3 leading-relaxed">
+                    Put your save file as a text file here and it will load all what you save.
+                  </p>
+
+                  <label 
+                    onDragOver={(e) => { e.preventDefault(); setIsDraggingSave(true); }}
+                    onDragLeave={() => setIsDraggingSave(false)}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      setIsDraggingSave(false);
+                      if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                        handleLoadFromFile(e.dataTransfer.files[0]);
+                      }
+                    }}
+                    className={`w-full p-4 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center text-center transition-all cursor-pointer ${
+                      isDraggingSave 
+                        ? 'border-blue-500 bg-blue-50 scale-[1.01]' 
+                        : 'border-slate-200 bg-slate-50 hover:border-blue-400 hover:bg-blue-50/40'
+                    }`}
+                  >
+                    <input 
+                      type="file" 
+                      accept=".txt,.json,text/plain" 
+                      className="hidden" 
+                      onChange={(e) => {
+                        if (e.target.files && e.target.files[0]) {
+                          handleLoadFromFile(e.target.files[0]);
+                        }
+                      }} 
+                    />
+                    <FileText size={28} className="text-blue-500 mb-2" />
+                    <span className="text-xs font-black text-slate-700">
+                      Put your save file as a text file here
+                    </span>
+                    <span className="text-[10px] text-slate-400 mt-1">
+                      Click to choose save file (.txt) or drag & drop here
+                    </span>
+                  </label>
+
+                  <button
+                    onClick={handleLoadFromGameFiles}
+                    disabled={isLoadingSave}
+                    className="w-full mt-3 py-3 bg-slate-100 hover:bg-slate-200 active:scale-[0.98] text-slate-700 rounded-xl font-bold text-xs flex items-center justify-center gap-2 border border-slate-200 transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    <Upload size={14} className="text-blue-600" />
+                    {isLoadingSave ? 'Loading progress...' : 'Load from Game Files (saves/save.txt)'}
+                  </button>
+
+                  {loadMessage && (
+                    <motion.div 
+                      initial={{ opacity: 0, y: -4 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className={`mt-3 p-3 border rounded-xl text-xs font-bold flex items-center gap-2 ${
+                        loadMessage.type === 'success' 
+                          ? 'bg-emerald-50 text-emerald-800 border-emerald-200' 
+                          : 'bg-red-50 text-red-800 border-red-200'
+                      }`}
+                    >
+                      {loadMessage.type === 'success' ? (
+                        <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
+                      ) : (
+                        <AlertCircle size={16} className="text-red-600 shrink-0" />
+                      )}
+                      <span>{loadMessage.text}</span>
+                    </motion.div>
+                  )}
+                </div>
+
+                {/* Danger Zone */}
+                <div className="pt-6 border-t border-slate-100">
+                  <h5 className="font-black text-red-400 uppercase text-[10px] tracking-widest mb-4">
+                    Danger Zone
+                  </h5>
+                  <button 
+                    onClick={() => setShowResetConfirm(true)}
+                    className="w-full py-4 bg-red-50 text-red-600 border-2 border-red-100 rounded-2xl font-black flex items-center justify-center gap-2 hover:bg-red-100 transition-all"
+                  >
+                    <RotateCcw size={20} />
+                    {t('reset_game')}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {/* Reset Confirmation Modal */}
+        {showResetConfirm && (
+          <motion.div 
+            key="reset-confirm-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/80 z-[110] flex items-center justify-center p-6 text-center"
+            onClick={() => setShowResetConfirm(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-xs rounded-[2.5rem] p-8 shadow-2xl"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="w-20 h-20 bg-red-100 text-red-600 rounded-3xl flex items-center justify-center mx-auto mb-6 shadow-lg shadow-red-50">
+                <RotateCcw size={40} />
+              </div>
+              <h4 className="text-2xl font-black text-slate-800 mb-4">{t('reset_game')}</h4>
+              <p className="text-slate-500 mb-8 leading-relaxed font-medium">
+                {t('reset_confirm')}
+              </p>
+              
+              <div className="space-y-3">
+                <button 
+                  onClick={handleReset}
+                  className="w-full py-5 bg-red-600 text-white rounded-2xl font-black shadow-xl shadow-red-100 hover:bg-red-700 transition-all active:scale-95"
+                >
+                  {t('yes_reset')}
+                </button>
+                <button 
+                  onClick={() => setShowResetConfirm(false)}
+                  className="w-full py-4 bg-slate-100 text-slate-500 rounded-2xl font-black hover:bg-slate-200 transition-all"
+                >
+                  {t('cancel')}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {/* Offline Growth Modal */}
+        {showOfflineModal && (
+          <motion.div 
+            key="offline-modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/70 z-[100] flex items-center justify-center p-6"
+            onClick={() => setShowOfflineModal(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-xs rounded-[2.5rem] p-8 shadow-2xl text-center"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="w-24 h-24 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-6 border-8 border-green-50">
+                <Sprout size={48} />
+              </div>
+              <h4 className="text-3xl font-black text-slate-800 mb-2">Welcome Back!</h4>
+              <p className="text-slate-500 mb-8 leading-relaxed">
+                Your farm was busy while you were away! <br />
+                <span className="font-bold text-green-600">{offlineReadyCount} crops</span> are ready to harvest!
+              </p>
+              
+              <div className="space-y-3">
+                <button 
+                  onClick={collectAllReady}
+                  className="w-full py-5 bg-green-600 text-white rounded-2xl font-black shadow-xl shadow-green-200 flex items-center justify-center gap-3 hover:bg-green-700 transition-all active:scale-95"
+                >
+                  <Check size={24} />
+                  <span>Collect All</span>
+                </button>
+                
+                <button 
+                  onClick={() => setShowOfflineModal(false)}
+                  className="w-full py-4 bg-slate-100 text-slate-500 rounded-2xl font-black hover:bg-slate-200 transition-all"
+                >
+                  Go to Farm
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {/* Seasonal Event Modal (Terraria-style Details & Switcher) */}
+        {showEventModal && (
+          <EventModal
+            key="seasonal-event-modal"
+            isOpen={showEventModal}
+            onClose={() => setShowEventModal(false)}
+            activeEvent={activeEvent}
+            dateText={formattedCalendarDate}
+            eventMode={gameState.eventOverride || 'auto'}
+            onSetEventMode={(override) => setGameState(prev => ({ ...prev, eventOverride: override }))}
+            onOpenShop={() => {
+              setShowEventModal(false);
+              setShowShop(true);
+            }}
+            onOpenNiro={() => {
+              setShowEventModal(false);
+              setShowNiroModal(true);
+            }}
+            onOpenRayan={() => {
+              setShowEventModal(false);
+              setShowRayanModal(true);
+            }}
+            t={t}
+          />
+        )}
+
+        {/* Rayan Ramadan NPC Modal */}
+        {showRayanModal && (
+          <RayanRamadanModal
+            key="rayan-ramadan-modal"
+            isOpen={showRayanModal}
+            onClose={() => setShowRayanModal(false)}
+            gameState={gameState}
+            setGameState={setGameState}
+            onOpenShop={() => {
+              setShowRayanModal(false);
+              setShowShop(true);
+            }}
+            t={t}
+          />
+        )}
+
+        {/* Niro NPC Panache Blender Modal - Summer Event */}
+        {showNiroModal && (
+          <NiroBlenderModal
+            key="niro-blender-modal"
+            isOpen={showNiroModal}
+            onClose={() => setShowNiroModal(false)}
+            gameState={gameState}
+            onBlendAndCoolSun={handleBlendAndCoolSun}
+            onOpenShop={() => {
+              setShowNiroModal(false);
+              setShowShop(true);
+            }}
+            t={t}
+          />
+        )}
+
+        {/* Markman NPC Guide Modal - Only during Christmas Event */}
+        {showMarkmanModal && activeEvent.id === 'christmas' && (
+          <MarkmanModal
+            key="markman-npc-modal"
+            isOpen={showMarkmanModal}
+            onClose={() => setShowMarkmanModal(false)}
+            gameState={gameState}
+            onOpenChristmasTree={() => setShowChristmasTreeModal(true)}
+            onBuyCandyCaneSeed={handleBuyCandyCaneSeed}
+            t={t}
+          />
+        )}
+
+        {/* Christmas Tree, Challenges & Santa's Presents Modal */}
+        {showChristmasTreeModal && (
+          <ChristmasTreeModal
+            key="christmas-tree-modal"
+            isOpen={showChristmasTreeModal}
+            onClose={() => setShowChristmasTreeModal(false)}
+            gameState={gameState}
+            setGameState={setGameState}
+            onBuyCandyCaneSeed={handleBuyCandyCaneSeed}
+            t={t}
+          />
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}

@@ -1,0 +1,10 @@
+{
+  "name": "Pocket Farm",
+  "description": "A cozy 2D farming game featuring automated Terraria-style seasonal events like Ramadan and Summer, exclusive crops, and farm expansion.",
+  "requestFramePermissions": [
+    "notifications"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
